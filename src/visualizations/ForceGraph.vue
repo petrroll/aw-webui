@@ -85,7 +85,7 @@ function ForceGraph(
     nodeId = d => d.id, // given d in nodes, returns a unique identifier (string)
     nodeGroup = d => d.group, // given d in nodes, returns an (ordinal) value for color
     nodeGroups = undefined, // an array of ordinal values representing the node groups
-    nodeTitle = null, // given d in nodes, a title string
+    nodeTitle = d => `Category: ${d.id}`, // given d in nodes, a title string
     nodeFill = 'currentColor', // node stroke fill (if not using a group color encoding)
     nodeStroke = '#fff', // node stroke color
     nodeStrokeWidth = 1.5, // node stroke width, in pixels
@@ -117,7 +117,7 @@ function ForceGraph(
   const N: string[] = d3.map(nodes, nodeId).map(intern);
   const LS: GLinkEnd[] = d3.map(links, linkSource).map(intern);
   const LT: GLinkEnd[] = d3.map(links, linkTarget).map(intern);
-  if (nodeTitle === undefined) nodeTitle = (_, i) => N[i];
+  if (nodeTitle === undefined) nodeTitle = d => d.id;
   const T = nodeTitle == null ? null : d3.map(nodes, nodeTitle);
   const G = nodeGroup == null ? null : d3.map(nodes, nodeGroup).map(intern);
   const W = typeof linkStrokeWidth !== 'function' ? null : d3.map(links, linkStrokeWidth);

@@ -64,7 +64,7 @@ export default {
   },
   beforeRouteLeave(to, from, next) {
     const categoryStore = useCategoryStore();
-    if (categoryStore.classes_unsaved_changes) {
+    if (categoryStore.classes_unsaved_changes || categoryStore.rules_v2_unsaved_changes) {
       if (confirm(this.$t('settings.unsavedCategoriesLeave'))) {
         next();
       } else {

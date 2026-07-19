@@ -43,7 +43,13 @@ interface Entry {
   color?: string;
   colorKey?: string | string[];
   link?: string;
-  category?: string;
+  category?: string[];
+}
+
+export function buildSummaryTooltip(app: Entry): string {
+  const category =
+    app.category && app.category.length > 0 ? `\nCategory: ${app.category.join(' > ')}` : '';
+  return app.hovertext + category + '\n' + seconds_to_duration(app.duration);
 }
 
 function update(container: HTMLElement, apps: Entry[]) {
@@ -95,7 +101,7 @@ function update(container: HTMLElement, apps: Entry[]) {
         eg.select('rect').style('fill', appcolor);
       });
 
-    eg.append('title').text(app.hovertext + '\n' + seconds_to_duration(app.duration));
+    eg.append('title').text(buildSummaryTooltip(app));
 
     // Color box background
     eg.append('rect')

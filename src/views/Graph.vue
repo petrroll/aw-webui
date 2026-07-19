@@ -67,9 +67,11 @@ import 'vue-awesome/icons/spinner';
 import 'vue-awesome/icons/angle-double-down';
 import 'vue-awesome/icons/angle-double-up';
 
-import { canonicalEvents } from '~/queries';
+import { queryStringToArray, resolveActivityProfile } from '~/queries';
 
 import { useCategoryStore } from '~/stores/categories';
+import { useBucketsStore } from '~/stores/buckets';
+import { useSettingsStore } from '~/stores/settings';
 
 import { getClient } from '~/util/awclient';
 
@@ -81,6 +83,7 @@ export default {
   data() {
     return {
       categoryStore: useCategoryStore(),
+      bucketsStore: useBucketsStore(),
 
       events: null,
       graphdata: {},
@@ -99,7 +102,7 @@ export default {
     };
   },
   mounted: async function () {
-    await this.categoryStore.load();
+    await Promise.all([this.categoryStore.load(), this.bucketsStore.ensureLoaded()]);
   },
   methods: {
     generate: async function () {
@@ -107,19 +110,21 @@ export default {
       this.graphdata = this.generateGraphData(this.events);
     },
     fetchEvents: async function () {
-      // TODO: use full query (one per day/timeperiod) instead of canonicalEvents
-      let query = canonicalEvents({
-        bid_window: 'aw-watcher-window_' + this.queryOptions.hostname,
-        bid_afk: 'aw-watcher-afk_' + this.queryOptions.hostname,
+      // TODO: use full query (one per day/timeperiod) instead of resolving each period separately
+      let query = resolveActivityProfile({
+        hostname: this.queryOptions.hostname,
+        bid_window: this.bucketsStore.bucketsWindow(this.queryOptions.hostname)[0],
+        bid_afk: this.bucketsStore.bucketsAFK(this.queryOptions.hostname)[0],
         filter_afk: this.queryOptions.filter_afk,
         categories: this.categoryStore.classes_for_query,
         filter_categories: this.excludeUncategorized
           ? this.categoryStore.classes_for_query.map(t => t[0])
           : null,
+        ...useSettingsStore().compiledRulesV2,
       });
       query += '; RETURN = events;';
 
-      const query_array = query.split(';').map(s => s.trim() + ';');
+      const query_array = queryStringToArray(query);
       const start = moment(this.queryOptions.start).format();
       const end = moment(this.queryOptions.stop).format();
       const timeperiods = [start + '/' + end];

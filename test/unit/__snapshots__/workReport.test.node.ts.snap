@@ -1,25 +1,39 @@
 // Jest Snapshot v1, https://goo.gl/fbAQLP
 
 exports[`workReport host helpers buildWorkReportQuery produces a snapshot-stable query for multiple hosts 1`] = `
-"
-            events_0 = flood(query_bucket("aw-watcher-window_laptop"));
-            not_afk_0 = flood(query_bucket("aw-watcher-afk_laptop"));
-            not_afk_0 = filter_keyvals(not_afk_0, "status", ["not-afk"]);
-            events_0 = filter_period_intersect(events_0, not_afk_0);
-            events_0 = categorize(events_0, []);
-            events_0 = filter_keyvals(events_0, "$category", [["Work"]]);
-
-            events_1 = flood(query_bucket("aw-watcher-window_desktop"));
-            not_afk_1 = flood(query_bucket("aw-watcher-afk_desktop"));
-            not_afk_1 = filter_keyvals(not_afk_1, "status", ["not-afk"]);
-            events_1 = filter_period_intersect(events_1, not_afk_1);
-            events_1 = categorize(events_1, []);
-            events_1 = filter_keyvals(events_1, "$category", [["Work"]]);
-
+"events = [];
+legacy_activity = flood(query_bucket("aw-watcher-window_laptop"));
+events = legacy_activity;
+stopwatch_events = [];
+not_afk = flood(query_bucket("aw-watcher-afk_laptop"));
+not_afk = filter_keyvals(not_afk, "status", ["not-afk"]);
+browser_events = [];
+events = filter_period_intersect(events, not_afk);
+events = categorize(events, []);
+events_host_0 = events;
+not_afk_host_0 = not_afk;
 events = [];
-events = union_no_overlap(events, events_0);
-events = union_no_overlap(events, events_1);
-          duration = sum_durations(events);
-          RETURN = {"events": events, "duration": duration};
-"
+legacy_activity = flood(query_bucket("aw-watcher-window_desktop"));
+events = legacy_activity;
+stopwatch_events = [];
+not_afk = flood(query_bucket("aw-watcher-afk_desktop"));
+not_afk = filter_keyvals(not_afk, "status", ["not-afk"]);
+browser_events = [];
+events = filter_period_intersect(events, not_afk);
+events = categorize(events, []);
+events_host_1 = events;
+not_afk_host_1 = not_afk;
+events_background_host_0 = [];
+events_background_host_1 = [];
+events = [];
+not_afk = [];
+events = union_no_overlap(events, events_host_0);
+not_afk = union_no_overlap(not_afk, not_afk_host_0);
+events = union_no_overlap(events, events_host_1);
+not_afk = union_no_overlap(not_afk, not_afk_host_1);
+events = union_no_overlap(events, events_background_host_0);
+events = union_no_overlap(events, events_background_host_1);
+events = filter_keyvals(events, "$category", [["Work"]]);
+duration = sum_durations(events);
+RETURN = {"events": events, "duration": duration};"
 `;

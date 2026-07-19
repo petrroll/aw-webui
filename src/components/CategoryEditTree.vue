@@ -14,18 +14,35 @@ div
           span(v-if="_class.data && _class.data.score !== undefined" :style="'color: ' + (_class.data.score > 0 ? 'green' : 'red')")
             | &nbsp; {{ _class.data.score >= 0 ? '+' : '' }}{{ _class.data.score }}
 
-    div.col-4.col-md-8
-      span.d-none.d-md-inline
-        span(v-if="_class.rule.type === 'regex'") Rule ({{_class.rule.type}}): #[code {{_class.rule.regex}}]
-        span.text-muted(v-else) No rule
-      span.float-right
-        b-btn.ml-1.border-0(size="sm", variant="outline-secondary", @click="showEditModal(_class.id)" pill)
+    div.col-4.col-md-8.d-flex.align-items-center
+      span.rule-summary.d-none.d-md-inline-block(
+        :class="{ 'text-muted': canonicalRule.type === 'none' }"
+        tabindex="0"
+        role="button"
+        v-b-tooltip.hover.focus
+        :title="ruleTooltip"
+      ) {{ ruleSummary }}
+      span.rule-actions.ml-auto
+        b-btn.ml-1.border-0(
+          size="sm"
+          variant="outline-secondary"
+          @click="showEditModal(_class.id)"
+          pill
+        )
           icon(name="edit")
-        b-btn.ml-1.border-0(size="sm", variant="outline-success", @click="addSubclass(_class); expanded = true" pill)
+        b-btn.ml-1.border-0(
+          size="sm"
+          variant="outline-success"
+          @click="addSubclass(_class); expanded = true"
+          pill
+        )
           icon(name="plus")
   div
     div.pa-2(v-for="child in _class.children", style="background: rgba(0, 0, 0, 0);", v-show="expanded")
-      CategoryEditTree(:_class="child", :depth="depth+1")
+      CategoryEditTree(
+        :_class="child"
+        :depth="depth+1"
+      )
 
   div(v-if="editingId !== null")
     CategoryEditModal(:categoryId='editingId', @hidden="hideEditModal()")
@@ -42,6 +59,8 @@ import 'vue-awesome/icons/edit';
 
 import CategoryEditModal from './CategoryEditModal.vue';
 import { useCategoryStore } from '~/stores/categories';
+import { useSettingsStore } from '~/stores/settings';
+import { findCategoryRuleV2, legacyRuleToV2, type RuleExpressionV2 } from '~/util/rulesV2';
 
 import _ from 'lodash';
 
@@ -60,6 +79,7 @@ export default {
   data: function () {
     return {
       categoryStore: useCategoryStore(),
+      settingsStore: useSettingsStore(),
 
       expanded: this.depth < 1,
       editingId: null,
@@ -72,8 +92,101 @@ export default {
       }
       return countChildren(this._class);
     },
+    canonicalRule: function (): RuleExpressionV2 {
+      const rules = this.settingsStore.rulesV2;
+      const canonicalName = this.categoryStore.canonicalNameForPendingPath(this._class.name);
+      const category = findCategoryRuleV2(
+        rules.activity_profiles_v2[0],
+        rules.category_sets_v2,
+        canonicalName
+      );
+      const pendingEdit = this.categoryStore.pendingV2Edit(category?.id, this._class.name);
+      return pendingEdit?.rule ?? category?.rule ?? legacyRuleToV2(this._class.rule);
+    },
+    ruleSummary: function (): string {
+      return this.formatRule(this.canonicalRule, false);
+    },
+    ruleTooltip: function (): string {
+      if (this.canonicalRule.type === 'none') {
+        return String(this.$t('settings.categorization.noneRuleWarning'));
+      }
+      return this.formatRule(this.canonicalRule, true);
+    },
   },
   methods: {
+    formatRule(expression: RuleExpressionV2, full: boolean, nested = false): string {
+      if (expression.type === 'none') {
+        return String(this.$t('settings.categorization.ruleSummaryNone'));
+      }
+      if (expression.type === 'regex') {
+        const limit = 36;
+        const pattern =
+          !full && expression.regex.length > limit
+            ? `${expression.regex.slice(0, limit - 1)}…`
+            : expression.regex;
+        const verb = expression.negate
+          ? this.$t('settings.categorization.ruleSummaryExcludes')
+          : this.$t('settings.categorization.ruleSummaryMatches');
+        let summary = `${verb} /${pattern}/`;
+        if (full) {
+          const details: string[] = [];
+          if (expression.source) {
+            const sources =
+              this.categoryStore.pendingV2Sources ??
+              this.settingsStore.rulesV2.activity_profiles_v2[0]?.sources ??
+              [];
+            const source = sources.find(candidate => candidate.id === expression.source);
+            details.push(
+              `${this.$t('settings.categorization.ruleSummarySource')}: ${
+                source?.label ?? expression.source
+              }`
+            );
+          }
+          const fields = expression.fields ?? (expression.field ? [expression.field] : []);
+          if (fields.length) {
+            details.push(
+              `${this.$t('settings.categorization.ruleSummaryFields')}: ${fields.join(', ')}`
+            );
+          }
+          if (expression.host) {
+            details.push(
+              `${this.$t('settings.categorization.ruleSummaryHost')}: ${expression.host}`
+            );
+          }
+          if (expression.weight !== undefined) {
+            details.push(
+              `${this.$t('settings.categorization.ruleSummaryWeight')}: ${expression.weight}`
+            );
+          }
+          if (expression.ignore_case) {
+            details.push(String(this.$t('settings.categorization.caseInsensitive')));
+          }
+          if (expression.value_mode === 'scalar') {
+            details.push(String(this.$t('settings.categorization.ruleSummaryScalar')));
+          }
+          if (details.length) summary += ` — ${details.join(' · ')}`;
+        }
+        return summary;
+      }
+
+      const visibleRules = full ? expression.rules : expression.rules.slice(0, 4);
+      const connector = ` ${this.$t(
+        expression.type === 'all'
+          ? 'settings.categorization.ruleSummaryAnd'
+          : 'settings.categorization.ruleSummaryOr'
+      )} `;
+      let children = visibleRules.map(rule => this.formatRule(rule, full, true)).join(connector);
+      if (!full && expression.rules.length > visibleRules.length) {
+        children += ` … +${expression.rules.length - visibleRules.length}`;
+      }
+      const label = this.$t(
+        expression.type === 'all'
+          ? 'settings.categorization.ruleSummaryAll'
+          : 'settings.categorization.ruleSummaryAny'
+      );
+      const summary = `${label}: ${children}`;
+      return nested ? `(${summary})` : summary;
+    },
     addSubclass: function (parent) {
       // Generate a unique default name to prevent duplicate name conflicts (#702)
       const baseName = 'New class';
@@ -106,5 +219,16 @@ export default {
 .row.class:hover {
   background-color: #eee;
   border-radius: 5px;
+}
+
+.rule-summary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rule-actions {
+  flex: 0 0 auto;
 }
 </style>

@@ -104,13 +104,18 @@ div.sunburst
 import sunburst from './sunburst-clock';
 import moment from 'moment';
 import _ from 'lodash';
+import { getClient } from '~/util/awclient';
+import { useBucketsStore } from '~/stores/buckets';
+import { useCategoryStore } from '~/stores/categories';
+import { useSettingsStore } from '~/stores/settings';
+import { queryStringToArray, resolveActivityProfile, serializeQueryJson } from '~/queries';
+import { splitCategoryEventsByActivity } from '~/util/timelineCategories';
 
 export default {
   name: 'aw-sunburst-clock',
   props: {
     date: { type: String },
-    afkBucketId: { type: String },
-    windowBucketId: { type: String },
+    host: { type: String, required: true },
   },
 
   data: () => {
@@ -136,16 +141,38 @@ export default {
   },
 
   methods: {
-    todaysEvents: async function (bucket_id) {
-      const querystr = [`RETURN = flood(query_bucket("${bucket_id}"));`];
-      const data = await this.$aw.query(
+    resolvedEvents: async function () {
+      const bucketsStore = useBucketsStore();
+      const settingsStore = useSettingsStore();
+      const categoryStore = useCategoryStore();
+      const activeTime = settingsStore.rulesV2.activity_profiles_v2[0]?.active_time;
+      const afkBucket =
+        activeTime?.type === 'legacy' ? bucketsStore.bucketsAFK(this.host)[0] : undefined;
+      const query =
+        resolveActivityProfile({
+          hostname: this.host,
+          bid_window: bucketsStore.bucketsWindow(this.host)[0],
+          bid_afk: bucketsStore.bucketsAFK(this.host)[0],
+          bid_browsers: bucketsStore.bucketsBrowser(this.host),
+          filter_afk: false,
+          include_audible: activeTime?.type === 'legacy' ? activeTime.include_audible : undefined,
+          always_active_pattern: settingsStore.always_active_pattern || undefined,
+          categories: categoryStore.classes_for_query,
+          filter_categories: null,
+          ...settingsStore.compiledRulesV2,
+        }) +
+        (afkBucket
+          ? `\nafk_status = flood(query_bucket(${serializeQueryJson(afkBucket)}));`
+          : '\nafk_status = [];') +
+        '\nRETURN = {"activity": events, "active": not_afk, "afk": afk_status};';
+      const data = await getClient().query(
         [`${this.starttime.format()}/${this.endtime.format()}`],
-        querystr
+        queryStringToArray(query)
       );
-      return data[0];
+      return data[0] ?? { activity: [], active: [], afk: [] };
     },
 
-    visualize: function () {
+    visualize: async function () {
       function buildHierarchy(parents, children) {
         parents = _.sortBy(parents, 'timestamp', 'desc');
         children = _.sortBy(children, 'timestamp', 'desc');
@@ -202,26 +229,28 @@ export default {
         };
       }
 
-      this.todaysEvents(this.afkBucketId).then(events_afk => {
-        this.todaysEvents(this.windowBucketId).then(events_window => {
-          let hierarchy = null;
-          if (events_afk.length > 0 && events_window.length > 0) {
-            hierarchy = buildHierarchy(events_afk, events_window);
-            this.centerMsg = 'Hover to inspect';
-          } else {
-            // FIXME: This should do the equivalent of "No data" when such is the case, but it doesn't.
-            hierarchy = {
-              timestamp: '',
-              // TODO: If we want a 12/24h clock, this has to change
-              duration: 0,
-              data: { title: 'ROOT' },
-              children: [],
-            };
-            this.centerMsg = 'No data';
-          }
-          sunburst.update(this.$el, hierarchy, this.starttime);
-        });
-      });
+      const { active, activity, afk } = await this.resolvedEvents();
+      const parents =
+        afk.length > 0
+          ? afk
+          : splitCategoryEventsByActivity(activity, active).map(event => ({
+              ...event,
+              data: { status: event.data.$inactive ? 'afk' : 'not-afk' },
+            }));
+      let hierarchy = null;
+      if (parents.length > 0 && activity.length > 0) {
+        hierarchy = buildHierarchy(parents, activity);
+        this.centerMsg = 'Hover to inspect';
+      } else {
+        hierarchy = {
+          timestamp: '',
+          duration: 0,
+          data: { title: 'ROOT' },
+          children: [],
+        };
+        this.centerMsg = 'No data';
+      }
+      sunburst.update(this.$el, hierarchy, this.starttime);
     },
   },
 };

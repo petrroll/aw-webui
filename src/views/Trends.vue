@@ -26,9 +26,8 @@ div
 
   div(v-if="!host")
     b-alert(show variant="info")
-      | No host with window/AFK buckets available. Install
-      | #[a(href="https://docs.activitywatch.net/en/latest/watchers.html") aw-watcher-window and aw-watcher-afk]
-      | to use this view.
+      | {{ $t('settings.categorization.noResolvedActivityHost') }}
+      span.ml-1 {{ $t('settings.categorization.activitySetupHelp') }}
 
   div(v-else-if="loading")
     b-spinner.mr-2(small)
@@ -91,7 +90,7 @@ div
 import moment from 'moment';
 import { get_today_with_offset, format_date_short, format_date_with_weekday } from '~/util/time';
 import { buildBarchartDataset } from '~/util/datasets';
-import { canonicalEvents } from '~/queries';
+import { queryStringToArray, resolveActivityProfile } from '~/queries';
 import { getClient } from '~/util/awclient';
 import { useBucketsStore } from '~/stores/buckets';
 import { useCategoryStore } from '~/stores/categories';
@@ -363,23 +362,21 @@ export default {
     buildCategoryQuery(): string[] {
       const cats = this.categoryStore.classes_for_query;
       const code =
-        canonicalEvents({
-          bid_window: 'aw-watcher-window_' + this.host,
-          bid_afk: 'aw-watcher-afk_' + this.host,
+        resolveActivityProfile({
+          hostname: this.host,
+          bid_window: this.bucketsStore.bucketsWindow(this.host)[0],
+          bid_afk: this.bucketsStore.bucketsAFK(this.host)[0],
           filter_afk: true,
           categories: cats,
           filter_categories: null,
           always_active_pattern: this.settingsStore.always_active_pattern || undefined,
+          ...this.settingsStore.compiledRulesV2,
         }) +
         `
         cat_events = sort_by_duration(merge_events_by_keys(events, ["$category"]));
         RETURN = {"cat_events": cat_events};
       `;
-      return code
-        .split(';')
-        .map(s => s.trim())
-        .filter(s => s)
-        .map(s => s + ';');
+      return queryStringToArray(code);
     },
   },
 };

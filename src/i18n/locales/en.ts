@@ -6,7 +6,7 @@ export default {
     activity: 'Activity',
     loading: 'Loading...',
     noActivityReports:
-      'No activity reports available. Make sure you have both an AFK and window watcher running.',
+      'No activity reports available. Make sure an activity-producing watcher is running and your active-time settings allow this period.',
     timeline: 'Timeline',
     stopwatch: 'Stopwatch',
     tools: 'Tools',
@@ -37,6 +37,7 @@ export default {
   common: {
     loading: 'Loading...',
     save: 'Save',
+    apply: 'Apply',
     cancel: 'Cancel',
     confirm: 'Confirm',
     import: 'Import',
@@ -61,7 +62,8 @@ export default {
   },
   settings: {
     title: 'Settings',
-    unsavedCategoriesLeave: 'Your categories have unsaved changes, are you sure you want to leave?',
+    unsavedCategoriesLeave:
+      'Your categorization rules have unsaved changes. Are you sure you want to leave?',
     daystart: {
       startOfDay: 'Start of day',
       startOfDayHelp:
@@ -118,10 +120,12 @@ export default {
       title: 'Always count as active pattern',
       help1: 'Apps or titles matching this regular expression will never be counted as AFK.',
       help2:
-        'Can be used to count time as active, despite no input (like meetings, or games with controllers). An empty string disables it.',
+        'This regular expression is tested against the active window’s app name and title. A match adds that time as active even when the AFK watcher reports AFK; it never removes active time. Leave it empty to disable this override.',
       example: 'Example expression:',
       invalid: 'Invalid pattern',
       tooBroad: 'Pattern too broad',
+      enabled: 'Enabled',
+      disabled: 'Disabled',
     },
     categorization: {
       title: 'Categorization',
@@ -135,11 +139,9 @@ export default {
       forum: 'the forum',
       docsIntro: 'For help on how to write categorization rules, see',
       documentation: 'the documentation',
-      categorySet: 'Category set:',
-      newSet: 'New set',
-      deleteSet: 'Delete set',
-      setsAvailable: '{count} sets available — switch sets to use different rule profiles.',
       unsavedChanges: 'You have unsaved changes!',
+      importReplaceConfirm:
+        'Importing will replace the current categorization rules, sources, and active-time settings. Continue?',
       discard: 'Discard',
       addCategory: 'Add category',
       categories: 'Categories',
@@ -147,6 +149,241 @@ export default {
       builderSubtitle: 'Generate rules from uncategorized activity',
       openBuilder: 'Open builder',
       hideBuilder: 'Hide builder',
+      editorModeTitle: 'Editor mode',
+      editorModeHelp:
+        'Choose how you want to edit categorization rules. Changing editors does not disable your rules.',
+      editorModeSimple: 'Simple',
+      editorModeAdvanced: 'Advanced',
+      editorModeHintTitle: 'Simple vs Advanced',
+      editorModeHintSimple:
+        'Simple covers common app/title regular-expression rules, one rule per category.',
+      editorModeHintAdvanced:
+        'Advanced adds AND/OR conditions, match weights, tie-break priority, prerequisites, custom sources, and advanced active-time rules.',
+      editorModeHintSwitch:
+        'Switching to Advanced does not change or delete anything. You can return to Simple without changes while every setting still fits the Simple editor.',
+      editorModeHintLossless:
+        'Your current rules fit the Simple editor, so you can switch back without losing anything.',
+      editorModeHintHasChanges: 'Returning to Simple would change:',
+      editorModeHintCategory: '{category}: {reasons}.',
+      editorModeHintReasonRule: 'uses an advanced rule',
+      editorModeHintReasonPriority: 'has tie-break priority',
+      editorModeHintReasonPrerequisites: 'requires parent categories',
+      editorModeHintMoreCategories: '+{count} more categories',
+      editorModeHintActiveTime: 'Active time: the custom rule would return to Automatic.',
+      editorModeHintSources: 'Advanced watcher-data selections would be removed: {sources}.',
+      editorModeHintReview: 'You will see the full list before anything changes.',
+      editorModeHintUnsaved: 'Save or discard your changes before switching editors.',
+      downgradeTitle: 'Switch to the simple editor?',
+      downgradeHelp:
+        'These settings cannot be represented in the Simple editor. Switching will reset or remove them as listed below. Staying in Advanced keeps everything unchanged.',
+      downgradeCategories: 'Categories',
+      downgradeReasonRule: 'Rule cannot be represented in the simple editor and will be reset.',
+      downgradeReasonPriority: 'Nonzero category priority will be removed.',
+      downgradeReasonPrerequisites: 'Prerequisites will be removed.',
+      downgradeActiveTime: 'Active-time rule',
+      downgradeActiveTimeReason: 'The expression active-time rule will revert to AFK behavior.',
+      downgradeSources: 'Watcher data used by Advanced rules',
+      downgradeSourcesHelp:
+        'These are watcher or bucket selections that Advanced rules can read. The Simple editor cannot use them, so switching removes these selections and resets the affected rules listed above.',
+      downgradeSourceItem: '{label}',
+      downgradeConfirm: 'Switch and discard these',
+      simpleRuleLocked:
+        'This category cannot be edited with simple controls. Switch Editor mode to Advanced.',
+      simpleActiveTimeLocked:
+        'This active-time expression is locked. Switch Editor mode to Advanced.',
+      activeTimeTitle: 'Active time',
+      activeTimeHelp: 'Choose how ActivityWatch decides whether recorded time is active or AFK.',
+      activeTimeAutomatic: 'Automatic',
+      activeTimeAutomaticRecommended: 'Automatic (recommended)',
+      activeTimeAutomaticHelp:
+        'Time counts as active while the AFK watcher detects keyboard or mouse input, and as AFK after its configured period without input. If “Count audible browser tab as active” is enabled, time also counts as active while the foreground browser is playing audio, even without input.',
+      activeTimeAutomaticPending:
+        'Your custom rule remains active until you confirm switching back to Automatic.',
+      activeTimeCustom: 'Custom rule',
+      activeTimeCustomHelp:
+        'Build an expression over watcher data. Once saved, it replaces Automatic AFK and audible handling.',
+      activeTimeCustomPending:
+        'Automatic remains active until this custom rule is valid and saved.',
+      useAutomaticActiveTime: 'Use Automatic',
+      useAutomaticActiveTimeConfirm:
+        'Switching to Automatic will discard the custom active-time rule. Continue?',
+      discardCustomActiveTimeDraftConfirm:
+        'Discard the unsaved custom active-time rule and return to Automatic?',
+      saveCustomActiveTime: 'Save custom rule',
+      sourcesTitle: 'Advanced rule sources',
+      manageSources: 'Manage sources',
+      hideSources: 'Hide sources',
+      sourcesHelp:
+        'Define watcher buckets that advanced rules can reference and optionally use to create activity.',
+      sourceNamespaceRequired:
+        'This server cannot attach watcher data to activity yet. Update the server before managing sources.',
+      previewTitle: 'Explain and preview',
+      openPreview: 'Open preview',
+      hidePreview: 'Hide preview',
+      previewHelp:
+        'Test recent events and see the winning category, other matches, scores, prerequisites, and selected OR branch.',
+      previewEmpty: 'No matching events were found in this range.',
+      previewNoFields: 'No displayable fields',
+      previewAction: 'Preview',
+      previewUnavailable:
+        'Rule explanations require a backend with diagnostic categorization support.',
+      previewColEvent: 'Event',
+      previewColCategory: 'Category',
+      previewColDetails: 'Details',
+      previewUncategorized: 'Uncategorized',
+      previewCandidateScore: '— score {score}',
+      previewWinner: 'winner',
+      previewPrerequisiteNotMet: 'prerequisite not met',
+      previewLostTiebreak: 'lost tie-break',
+      previewOrBranch: ', OR branch {branch}',
+      validationReview: 'Review these settings before saving:',
+      validationSourceBucketsRequired: 'Source "{source}" needs at least one watcher bucket.',
+      validationSourceFieldsRequired: 'Source "{source}" needs at least one field.',
+      validationSourceBucketsUnique:
+        'Source "{source}" contains the same watcher bucket more than once.',
+      validationSourceId: 'Source "{source}" has an invalid or duplicate internal ID.',
+      validationSourceOwnership:
+        'Source "{source}" has incomplete device ownership. Re-select its buckets or use Every device.',
+      validationPatternRequired: 'Enter a regular expression.',
+      validationPatternInvalid: 'Enter a valid regular expression.',
+      validationPatternTooLong: 'This regular expression is too long.',
+      validationWholeNumber: 'Weights and priorities must be whole numbers.',
+      validationGroupRequired: 'Add at least one condition to this group.',
+      validationActiveTimeSource: 'Choose a source for every active-time condition.',
+      validationGeneric: 'Review this setting: {error}',
+      profileUnavailable: 'No activity profile is available.',
+      ruleUnknownSource: 'This rule references an unavailable source: {source}.',
+      advancedRulesNotApplied:
+        'Advanced rules are not being applied because this server lacks required flexible-rules support. Basic results are shown instead.',
+      openRulesSettings: 'Open rules settings.',
+      noResolvedActivityHost: 'No device currently has enough watcher data to resolve activity.',
+      activitySetupHelp:
+        'Start an activity-producing watcher or configure a source that can create activity periods.',
+      noWatcherDataHost:
+        'No device has watcher data yet. Start a watcher to collect activity data.',
+      importJsonOnly: 'Only JSON files can be imported.',
+      importFormatUnknown: 'The category import format is not recognized.',
+      editCategory: 'Edit category',
+      bucketLabelWindow: 'App & window',
+      bucketLabelAfk: 'AFK status',
+      bucketLabelBrowser: 'Browser tabs',
+      bucketLabelStopwatch: 'Stopwatch',
+      bucketLabelVirtualDesktop: 'Virtual desktop',
+      sourceBucketUnavailable: 'The selected watcher bucket is no longer available.',
+      sourceBucketsNeedHosts: 'Every selected watcher bucket must have a known host.',
+      restoreDefaultsConfirm:
+        'Restore default categories? This will remove advanced rules, prerequisites, and source references.',
+      sourceLabel: 'Name',
+      builtinWindowSourceLabel: 'App & window',
+      builtinWindowSourceHelp:
+        'Built in. ActivityWatch resolves it separately for each device. AFK behavior is configured under Active time; other watchers are added when a rule needs them.',
+      builtinWindowFieldsHelp:
+        'Choose which fields are available to App & window rules. The defaults are app and title.',
+      noActivityCreatingSourceWarning:
+        'No source can currently create activity periods. Categories will have no time to classify until at least one source is enabled.',
+      sourceCreatesActivityEnabled: 'Can create activity periods',
+      sourceCreatesActivityHelp:
+        'This profile-wide setting lets this watcher count as tracked activity in every report. Rules can reference it either way, and overlapping sources coexist.',
+      activityCoverageUnavailable:
+        'This server cannot create activity periods from custom sources.',
+      sourceInternalId: 'Internal ID',
+      sourceBucketIds: 'Watcher buckets',
+      sourceBucketIdsHelp: 'Comma-separated exact bucket IDs.',
+      sourceBucketOwner: '{bucket} — device: {host}',
+      sourceBucketsUnavailable: 'Not currently available: {buckets}',
+      sourceBucketRequired: 'Select at least one watcher bucket.',
+      sourceScope: 'Device scope',
+      sourceScopeHost: 'Use on its owning device',
+      sourceScopeGlobal: 'Use on every device',
+      sourceScopeGlobalHelp: 'Use this source on every device.',
+      sourceScopeHostHelp: 'Device ownership follows watcher metadata.',
+      removeSource: 'Remove source',
+      addSource: 'Add source',
+      winningScore: 'Winning score',
+      previewSummary: '{matched} categories matched, {lost} lost',
+      weightHelp:
+        'Each matching rule contributes its weight. All (AND) adds the matching weights; Any (OR) uses only its highest-scoring matching branch. The category with the greatest total wins.',
+      noneRuleWarning: 'This category has no matching rule and will never match any events.',
+      ruleSummaryNone: 'No rule',
+      ruleSummaryMatches: 'Matches',
+      ruleSummaryExcludes: 'Excludes',
+      ruleSummaryAll: 'All',
+      ruleSummaryAny: 'Any',
+      ruleSummaryAnd: 'AND',
+      ruleSummaryOr: 'OR',
+      ruleSummarySource: 'source',
+      ruleSummaryFields: 'fields',
+      ruleSummaryHost: 'host',
+      ruleSummaryWeight: 'weight',
+      ruleSummaryScalar: 'text, numbers, and booleans',
+      emptyConditionWarning: 'This condition is not configured and will not match.',
+      replaceGroupConfirm: 'Changing this group will discard its other conditions. Continue?',
+      resetConditionConfirm:
+        'Switch to default app/window data and discard this condition’s advanced options?',
+      categoryPriority: 'Tie-break priority',
+      categoryPriorityHelp:
+        'Used only when categories have the same total match score. Higher wins; it is not added to the score.',
+      prerequisites: 'Require these parent categories to match',
+      prerequisitesHelp:
+        'This rule only applies when all selected parent categories also match; they do not affect the score.',
+      prerequisiteUnavailableWithoutRule:
+        'This parent has no matching rule, so it can never satisfy a requirement. Give the parent a rule first.',
+      prerequisiteSelectedWithoutRule:
+        'This required parent currently has no matching rule, so this category cannot match. Give the parent a rule or remove this requirement.',
+      prerequisiteMissingRule: 'Parent has no rule',
+      noPrerequisites: 'This category has no parent categories that can be required.',
+      advancedBackendRequired:
+        'Advanced rules require a server with flexible categorization support.',
+      ruleType: 'Rule type',
+      ruleNone: 'None',
+      ruleRegex: 'Regular expression',
+      ruleAll: 'All rules (AND)',
+      ruleAny: 'Any rule (OR)',
+      pattern: 'Pattern',
+      patternPlaceholder: 'Regular expression to match',
+      source: 'Match data from',
+      sourceHelp:
+        'Use Automatic for standard app and window-title matching, or choose a watcher to match its data. The watcher applies wherever it is available; use Host below to limit the rule to one computer.',
+      currentActivitySource: 'App & window (default fields)',
+      mainActivityAdvanced: 'App & window — choose fields and advanced options',
+      mainActivityAdvancedHelp:
+        'Uses the same app and window record as Automatic, while letting you choose fields, computer, exclusions, and match weight.',
+      automaticSourceHelp:
+        'Matches the active app name and window title. To match other data, such as a browser URL or virtual desktop, choose that watcher above.',
+      savedSources: 'Custom data sources',
+      savedWatcherSelections: 'Watcher data not currently available',
+      availableWatcherData: 'Watcher data',
+      allDevices: 'All devices',
+      sourceAvailableOn: 'available on {hosts}',
+      sourceDeviceUnknown: 'device not reported',
+      sourceWatcherDetails: '{availability}. Rule host: {host}.',
+      fields: 'Fields',
+      sourceFieldsHelp: 'Rules can use these as $source.{source}.<field>.',
+      fieldsHelp:
+        'Use every text field, or choose specific event-data fields. Inferred fields are listed automatically; custom keys can also be added.',
+      allFields: 'All text fields',
+      specificFields: 'Specific fields',
+      specificFieldsHelp:
+        'Choose at least one field. To clear the selection, switch to All text fields.',
+      scalarField: 'number / boolean',
+      customFieldPlaceholder: 'Add a custom field key',
+      addField: 'Add',
+      host: 'Host',
+      hostHelp: 'Limit this rule to one computer. Leave empty to match any host.',
+      anyHost: 'Any host',
+      caseInsensitive: 'Case insensitive',
+      excludeMatches: 'Exclude events that match',
+      priorityWeight: 'Match weight',
+      priorityWeightHelp:
+        'Added to the category score in an All (AND) group. In an Any (OR) group, only the highest-scoring matching branch counts.',
+      maximumScore: 'Maximum score',
+      groupScoreHelp: 'All (AND) adds child weights. Any (OR) uses the highest child weight.',
+      sourceInferenceWarning:
+        'Recent events could not be inspected for {buckets}; common fields are shown instead.',
+      allGroupHelp: 'Every rule below must match. Their match weights are added together.',
+      anyGroupHelp: 'At least one rule below must match. Only the highest-scoring match counts.',
+      addRule: 'Add condition',
+      removeRule: 'Remove condition',
     },
     developer: {
       title: 'Developer settings',
@@ -347,7 +584,11 @@ export default {
     topBucketData: 'Top Bucket Data',
   },
   timeline: {
+    activeStatus: 'Active',
+    inactiveStatus: 'Inactive (not counted)',
+    inactiveLegend: 'Striped category time is inactive and not counted.',
     title: 'Timeline',
+    categoryResult: 'Category',
     eventsShown: 'Events shown:',
     swimlanes: 'Swimlanes:',
     filterAfk: 'Filter AFK',
@@ -386,6 +627,13 @@ export default {
   workReport: {
     title: 'Work Time Report',
     loading: 'Loading...',
+    selectHost: 'Select at least one device.',
+    selectCategory: 'Select at least one category.',
+    unsupportedHosts:
+      'The selected devices do not have the activity and active-time sources required by this profile: {hosts}.',
+    skippedHosts:
+      'Skipped devices that cannot resolve this activity profile: {skipped}. Using: {used}.',
+    loadError: 'Could not load the work report. See the console for details.',
   },
   report: {
     title: 'Report',

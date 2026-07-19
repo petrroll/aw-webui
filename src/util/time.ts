@@ -99,6 +99,24 @@ export function get_today_with_offset(offset?: string): string {
   return moment().subtract(offset_dur).startOf('day').format('YYYY-MM-DD');
 }
 
+export function get_inclusive_local_date_range(
+  startDate: Moment | Date | string,
+  stopDate: Moment | Date | string
+): { start: Date; end: Date } {
+  const start = moment(startDate).startOf('day');
+  const stop = moment(stopDate).startOf('day');
+  if (!start.isValid() || !stop.isValid()) {
+    throw new Error('Select a valid start and stop date.');
+  }
+  if (stop.isBefore(start)) {
+    throw new Error('Stop date must be on or after start date.');
+  }
+  return {
+    start: start.toDate(),
+    end: stop.add(1, 'day').startOf('day').toDate(),
+  };
+}
+
 export function format_weekday_short(dateParam: Date, locale?: string | string[]) {
   return new Intl.DateTimeFormat(locale, { weekday: 'short' }).format(normalize_date(dateParam));
 }

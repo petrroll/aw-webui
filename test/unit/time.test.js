@@ -1,6 +1,7 @@
 import {
   format_day_of_month,
   format_weekday_short,
+  get_inclusive_local_date_range,
   get_short_month_labels,
   seconds_to_duration,
 } from '~/util/time';
@@ -8,6 +9,28 @@ import {
 describe('seconds_to_duration', () => {
   test('should format 8145 seconds as "2h 15m 45s"', () => {
     expect(seconds_to_duration(8145)).toBe('2h 15m 45s');
+  });
+
+  describe('inclusive local date ranges', () => {
+    test('treats the same start and stop date as one full local day', () => {
+      const range = get_inclusive_local_date_range('2026-07-18', '2026-07-18');
+
+      expect(range.start).toEqual(new Date(2026, 6, 18));
+      expect(range.end).toEqual(new Date(2026, 6, 19));
+    });
+
+    test('includes the complete stop date in a multi-day range', () => {
+      const range = get_inclusive_local_date_range('2026-07-18', '2026-07-20');
+
+      expect(range.start).toEqual(new Date(2026, 6, 18));
+      expect(range.end).toEqual(new Date(2026, 6, 21));
+    });
+
+    test('rejects an inverted date range', () => {
+      expect(() => get_inclusive_local_date_range('2026-07-20', '2026-07-18')).toThrow(
+        'Stop date must be on or after start date.'
+      );
+    });
   });
 
   test('should format 3630 seconds as "1h 0m 30s"', () => {

@@ -1,28 +1,49 @@
 import _ from 'lodash';
 import {
-  saveClasses,
-  saveCategories,
-  loadCategories,
   cleanCategory,
   defaultCategories,
   build_category_hierarchy,
   createMissingParents,
-  mergeCategorySets,
   annotate,
   Category,
-  CategorySet,
   Rule,
 } from '~/util/classes';
 import { getColorFromCategory } from '~/util/color';
 import { defineStore } from 'pinia';
+import { useSettingsStore } from '~/stores/settings';
+import {
+  deleteCategoryRuleV2,
+  collectRuleSourceIds,
+  synchronizeCategoryTreeV2,
+  updateCategoryRuleV2,
+  validateProfileRulesV2,
+  mergeSourceDefinitionChanges,
+  type RuleExpressionV2,
+  type SourceDefinitionV2,
+} from '~/util/rulesV2';
+
+interface PendingV2Edit {
+  categoryId?: string;
+  originalName: string[];
+  name: string[];
+  rule: RuleExpressionV2;
+  priority: number;
+  requires: string[];
+}
+
+interface PendingV2Delete {
+  delete: true;
+  categoryId?: string;
+  name: string[];
+}
 
 interface State {
   classes: Category[];
   classes_unsaved_changes: boolean;
-  // Category sets — named collections of category rules
-  category_sets: CategorySet[];
-  // Ordered list of active set IDs; first entry has highest priority when merging
-  active_set_ids: string[];
+  pending_v2_edits: Array<PendingV2Edit | PendingV2Delete>;
+  pending_v2_sources: SourceDefinitionV2[] | null;
+  _rules_v2_dirty_sections: string[];
+  replace_v2_rules_on_save: boolean;
 }
 
 function getScoreFromCategory(c: Category, allCats: Category[]): number {
@@ -57,45 +78,23 @@ function assignIds(classes: Category[]): Category[] {
   return classes.map(c => Object.assign(c, { id: i++ }));
 }
 
-/** Recompute the effective `classes` list from the provided active sets. */
-function computeEffectiveClasses(categorySets: CategorySet[], activeSetIds: string[]): Category[] {
-  const activeSets = categorySets.filter(s => activeSetIds.includes(s.id));
-  const merged = mergeCategorySets(activeSets);
-  return assignIds(createMissingParents(merged));
-}
-
-/**
- * Copy current effective classes back into the primary active set.
- *
- * Only safe when exactly one set is active: with multiple sets `state.classes`
- * is the merged result of all active sets and cannot be split back into
- * individual sets, so we skip the sync to avoid corrupting secondary sets.
- */
-function syncToPrimarySet(state: State) {
-  if (state.active_set_ids.length === 0 || state.category_sets.length === 0) return;
-  // Skip when multiple sets are active — state.classes is a merged result
-  // and writing it back to only the primary set would absorb all secondary
-  // sets' categories into it (data corruption).
-  if (state.active_set_ids.length > 1) return;
-  const primaryId = state.active_set_ids[0];
-  const primarySet = state.category_sets.find(s => s.id === primaryId);
-  if (primarySet) {
-    primarySet.categories = state.classes.map(cleanCategory);
-  }
-}
-
 export const useCategoryStore = defineStore('categories', {
   state: (): State => ({
     classes: [],
     classes_unsaved_changes: false,
-    category_sets: [],
-    active_set_ids: ['default'],
+    pending_v2_edits: [],
+    pending_v2_sources: null,
+    _rules_v2_dirty_sections: [],
+    replace_v2_rules_on_save: false,
   }),
 
   // getters
   getters: {
     classes_clean(): Category[] {
       return this.classes.map(cleanCategory);
+    },
+    rules_v2_unsaved_changes(): boolean {
+      return this._rules_v2_dirty_sections.length > 0;
     },
     classes_hierarchy() {
       const hier = build_category_hierarchy(_.cloneDeep(this.classes));
@@ -150,6 +149,45 @@ export const useCategoryStore = defineStore('categories', {
         return annotate(_.cloneDeep(this.classes.find((c: Category) => c.id == id)));
       };
     },
+    pendingV2Edit(this: State) {
+      return (categoryId: string | undefined, name: string[]): PendingV2Edit | undefined => {
+        const edit = this.pending_v2_edits.find(candidate => {
+          if ('delete' in candidate) return false;
+          return categoryId
+            ? candidate.categoryId === categoryId
+            : _.isEqual(candidate.name, name) || _.isEqual(candidate.originalName, name);
+        });
+        return edit && !('delete' in edit) ? _.cloneDeep(edit) : undefined;
+      };
+    },
+    pendingV2Sources(this: State): SourceDefinitionV2[] | null {
+      if (!this.pending_v2_sources) return null;
+      const persisted = useSettingsStore().rulesV2.activity_profiles_v2[0]?.sources ?? [];
+      return mergeSourceDefinitionChanges(persisted, this.pending_v2_sources, []);
+    },
+    canonicalNameForPendingPath(this: State) {
+      return (name: string[]): string[] => {
+        let canonicalName = [...name];
+        const renames = this.pending_v2_edits
+          .filter((candidate): candidate is PendingV2Edit => !('delete' in candidate))
+          .filter(candidate => !_.isEqual(candidate.originalName, candidate.name))
+          .sort((left, right) => right.name.length - left.name.length);
+        for (let pass = 0; pass < renames.length; pass++) {
+          let changed = false;
+          for (const rename of renames) {
+            if (
+              canonicalName.length >= rename.name.length &&
+              _.isEqual(canonicalName.slice(0, rename.name.length), rename.name)
+            ) {
+              canonicalName = rename.originalName.concat(canonicalName.slice(rename.name.length));
+              changed = true;
+            }
+          }
+          if (!changed) break;
+        }
+        return canonicalName;
+      };
+    },
     get_category_color() {
       return (cat: string[]): string => {
         return getColorFromCategory(this.get_category(normalizeSegments(cat)), this.classes);
@@ -181,133 +219,131 @@ export const useCategoryStore = defineStore('categories', {
   },
 
   actions: {
-    /**
-     * Load categories into the store.
-     *
-     * When called with an explicit `classes` array (e.g. in tests), those categories are loaded
-     * directly without touching category sets.
-     *
-     * When called without arguments, loads from the settings store — including multi-set support.
-     * Falls back to the legacy flat `classes` setting if no sets are defined yet.
-     */
     load(this: State, classes?: Category[]) {
-      if (classes !== undefined) {
-        // Explicit categories provided (test / programmatic path)
-        classes = createMissingParents(classes);
-        this.classes = assignIds(classes);
+      const loadedClasses = classes ?? useSettingsStore().classes;
+      this.classes = assignIds(createMissingParents(loadedClasses));
+      this.classes_unsaved_changes = false;
+      this.pending_v2_edits = [];
+      this.pending_v2_sources = null;
+      this.replace_v2_rules_on_save = false;
+    },
+
+    async save(this: State, sourceSnapshot?: SourceDefinitionV2[]) {
+      const settingsStore = useSettingsStore();
+      if (process.env.NODE_ENV === 'test' && !settingsStore.loaded) {
         this.classes_unsaved_changes = false;
+        this.pending_v2_edits = [];
         return;
       }
-
-      // Load sets from settings store
-      const { sets, activeIds } = loadCategories();
-      this.category_sets = sets;
-      this.active_set_ids = activeIds;
-
-      // Compute effective classes from active sets (merged in priority order)
-      this.classes = computeEffectiveClasses(this.category_sets, this.active_set_ids);
+      await settingsStore.ensureLoaded();
+      const rules = settingsStore.rulesV2;
+      let profiles = rules.activity_profiles_v2;
+      let categorySets = rules.category_sets_v2;
+      if (sourceSnapshot) {
+        profiles = _.cloneDeep(profiles);
+        profiles[0].sources = _.cloneDeep(sourceSnapshot);
+      }
+      const profileId = profiles[0]?.id ?? 'default';
+      for (const edit of this.pending_v2_edits) {
+        const updated =
+          'delete' in edit
+            ? deleteCategoryRuleV2({
+                profileId,
+                profiles,
+                categorySets,
+                categoryId: edit.categoryId,
+                name: edit.name,
+              })
+            : updateCategoryRuleV2({
+                profileId,
+                profiles,
+                categorySets,
+                ...edit,
+              });
+        profiles = updated.profiles;
+        categorySets = updated.categorySets;
+      }
+      if (this.pending_v2_sources) {
+        profiles = _.cloneDeep(profiles);
+        profiles[0].sources = mergeSourceDefinitionChanges(
+          profiles[0].sources,
+          this.pending_v2_sources,
+          []
+        );
+      }
+      const synchronized = synchronizeCategoryTreeV2({
+        profileId,
+        profiles,
+        categorySets,
+        classes: this.classes.map(cleanCategory),
+        replaceRules: this.replace_v2_rules_on_save,
+      });
+      const referencedSourceIds = new Set(
+        synchronized.categorySets[0].categories.flatMap(category => [
+          ...collectRuleSourceIds(category.rule),
+        ])
+      );
+      if (synchronized.profiles[0].active_time.type === 'expression') {
+        for (const sourceId of collectRuleSourceIds(synchronized.profiles[0].active_time.rule)) {
+          referencedSourceIds.add(sourceId);
+        }
+      }
+      synchronized.profiles[0].sources = synchronized.profiles[0].sources.filter(
+        source => !source.auto_generated || referencedSourceIds.has(source.id)
+      );
+      const errors = synchronized.profiles.flatMap(profile =>
+        validateProfileRulesV2(profile, synchronized.categorySets)
+      );
+      if (errors.length > 0) throw new Error(errors.join('\n'));
+      await settingsStore.saveCanonicalRulesV2({
+        profiles: synchronized.profiles,
+        categorySets: synchronized.categorySets,
+      });
       this.classes_unsaved_changes = false;
+      this.pending_v2_edits = [];
+      this.pending_v2_sources = null;
+      this.replace_v2_rules_on_save = false;
     },
-
-    save(this: State) {
-      // Sync current classes back to the primary active set before persisting
-      syncToPrimarySet(this);
-      saveCategories(this.category_sets, this.active_set_ids);
-      // Also update legacy flat classes field for backwards compatibility
-      saveClasses(this.classes);
-      this.classes_unsaved_changes = false;
+    discardPendingV2Changes(this: State) {
+      this.pending_v2_edits = [];
+      this.pending_v2_sources = null;
     },
-
-    // ── Category set management ──────────────────────────────────────────────
-
-    /**
-     * Create a new empty category set.
-     * The new set is NOT activated automatically — call switchToSet() after if needed.
-     */
-    createSet(this: State, id: string) {
-      if (this.category_sets.find(s => s.id === id)) {
-        console.warn('Category set already exists:', id);
-        return;
-      }
-      this.category_sets.push({ id, categories: [] });
-    },
-
-    /**
-     * Delete a category set by ID.
-     * The last remaining set cannot be deleted.
-     */
-    deleteSet(this: State, id: string) {
-      if (this.category_sets.length <= 1) {
-        console.warn('Cannot delete the last category set');
-        return;
-      }
-      this.category_sets = this.category_sets.filter(s => s.id !== id);
-      this.active_set_ids = this.active_set_ids.filter(aid => aid !== id);
-      if (this.active_set_ids.length === 0) {
-        this.active_set_ids = [this.category_sets[0].id];
-      }
-      this.classes = computeEffectiveClasses(this.category_sets, this.active_set_ids);
+    queueV2Sources(this: State, sources: SourceDefinitionV2[], baseline: SourceDefinitionV2[]) {
+      const changed = mergeSourceDefinitionChanges([], sources, baseline);
+      this.pending_v2_sources = mergeSourceDefinitionChanges(
+        this.pending_v2_sources ?? [],
+        changed,
+        []
+      );
       this.classes_unsaved_changes = true;
     },
-
-    /**
-     * Switch to a single active set by ID.
-     * Saves the current classes to the previously active set first.
-     */
-    switchToSet(this: State, id: string) {
-      if (!this.category_sets.find(s => s.id === id)) {
-        console.warn('Category set not found:', id);
-        return;
-      }
-      syncToPrimarySet(this);
-      this.active_set_ids = [id];
-      this.classes = computeEffectiveClasses(this.category_sets, this.active_set_ids);
-      this.classes_unsaved_changes = false;
+    setRulesV2DraftDirty(this: State, section: string, dirty: boolean) {
+      this._rules_v2_dirty_sections = dirty
+        ? _.uniq([...this._rules_v2_dirty_sections, section])
+        : this._rules_v2_dirty_sections.filter(candidate => candidate !== section);
     },
-
-    /**
-     * Discard unsaved in-memory edits and recompute classes from the stored sets.
-     *
-     * Call this before switchToSet() when the user explicitly chooses to discard
-     * changes. Without this, switchToSet() would call syncToPrimarySet() first —
-     * writing the discarded edits back into the set's in-memory state.
-     */
-    discardChanges(this: State) {
-      this.classes = computeEffectiveClasses(this.category_sets, this.active_set_ids);
-      this.classes_unsaved_changes = false;
-    },
-
-    /**
-     * Set multiple active sets (combined in priority order).
-     * The first ID in the list is the primary set (edits go here).
-     */
-    setActiveSets(this: State, ids: string[]) {
-      syncToPrimarySet(this);
-      this.active_set_ids = ids;
-      this.classes = computeEffectiveClasses(this.category_sets, this.active_set_ids);
+    queueV2Edit(this: State, edit: PendingV2Edit) {
+      const index = this.pending_v2_edits.findIndex(candidate => {
+        if ('delete' in candidate) return false;
+        return edit.categoryId
+          ? candidate.categoryId === edit.categoryId
+          : _.isEqual(candidate.originalName, edit.originalName);
+      });
+      if (index >= 0) this.pending_v2_edits.splice(index, 1, _.cloneDeep(edit));
+      else this.pending_v2_edits.push(_.cloneDeep(edit));
       this.classes_unsaved_changes = true;
     },
-
-    /**
-     * Rename a category set.
-     */
-    renameSet(this: State, oldId: string, newId: string) {
-      if (newId === oldId) return;
-      if (this.category_sets.find(s => s.id === newId)) {
-        console.warn('A set with that name already exists:', newId);
-        return;
-      }
-      const set = this.category_sets.find(s => s.id === oldId);
-      if (!set) {
-        console.warn('Category set not found:', oldId);
-        return;
-      }
-      set.id = newId;
-      this.active_set_ids = this.active_set_ids.map(id => (id === oldId ? newId : id));
+    queueV2Delete(this: State, name: string[], categoryId?: string) {
+      this.pending_v2_edits = this.pending_v2_edits.filter(
+        candidate =>
+          !(
+            'delete' in candidate &&
+            (categoryId ? candidate.categoryId === categoryId : _.isEqual(candidate.name, name))
+          )
+      );
+      this.pending_v2_edits.push({ delete: true, name: [...name], categoryId });
       this.classes_unsaved_changes = true;
     },
-
-    // ── Legacy mutations (operate on the effective `classes` list) ───────────
 
     // mutations
     import(this: State, classes: Category[]) {
@@ -315,6 +351,7 @@ export const useCategoryStore = defineStore('categories', {
       // overwrite id even if already set
       this.classes = classes.map(c => Object.assign(c, { id: i++ }));
       this.classes_unsaved_changes = true;
+      this.replace_v2_rules_on_save = true;
     },
     updateClass(this: State, new_class: Category) {
       console.log('Updating class:', new_class);
@@ -368,10 +405,15 @@ export const useCategoryStore = defineStore('categories', {
     restoreDefaultClasses(this: State) {
       this.classes = assignIds(createMissingParents(defaultCategories));
       this.classes_unsaved_changes = true;
+      this.replace_v2_rules_on_save = true;
     },
     clearAll(this: State) {
       this.classes = [];
       this.classes_unsaved_changes = true;
+      this.pending_v2_edits = [];
+      this.pending_v2_sources = null;
+      this._rules_v2_dirty_sections = [];
+      this.replace_v2_rules_on_save = false;
     },
   },
 });

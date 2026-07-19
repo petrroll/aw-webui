@@ -30,10 +30,27 @@ const buckets = [
 ];
 
 describe('workReport host helpers', () => {
-  test('getWorkReportHostOptions disables hosts without AFK buckets', () => {
+  const queryParams = (hosts: string[]) => ({
+    hosts,
+    host_params: Object.fromEntries(
+      hosts.map(host => [
+        host,
+        {
+          bid_window: `aw-watcher-window_${host}`,
+          bid_afk: `aw-watcher-afk_${host}`,
+        },
+      ])
+    ),
+    filter_afk: true,
+    categories: [],
+    filter_categories: [],
+    always_active_pattern: '',
+  });
+
+  test('getWorkReportHostOptions disables hosts without active-time sources', () => {
     expect(getWorkReportHostOptions(buckets as any)).toEqual([
       { value: 'laptop', text: 'laptop', disabled: false },
-      { value: 'phone', text: 'phone (requires aw-watcher-afk)', disabled: true },
+      { value: 'phone', text: 'phone (requires an active-time source)', disabled: true },
     ]);
   });
 
@@ -45,20 +62,27 @@ describe('workReport host helpers', () => {
     expect(getSupportedWorkReportHosts(['laptop', 'phone'], buckets as any)).toEqual(['laptop']);
   });
 
-  test('buildWorkReportQuery uses single-arg flood() for both window and afk buckets', () => {
+  test('buildWorkReportQuery resolves the legacy profile through canonical host queries', () => {
     // Regression: aw-query's flood() takes one argument. A previous version
     // passed breakTimeSeconds as a second argument, which made aw-server
     // respond with HTTP 400 "Tried to call function flood with invalid amount
     // of arguments" and broke the whole report.
-    const query = buildWorkReportQuery(['laptop'], '[]', []);
-    expect(query).toContain('events_0 = flood(query_bucket("aw-watcher-window_laptop"));');
-    expect(query).toContain('not_afk_0 = flood(query_bucket("aw-watcher-afk_laptop"));');
+    const query = buildWorkReportQuery(queryParams(['laptop']), []);
+    expect(query).toContain(
+      'legacy_activity = flood(query_bucket("aw-watcher-window_laptop"))'
+    );
+    expect(query).toContain(
+      'not_afk = flood(query_bucket("aw-watcher-afk_laptop"))'
+    );
     // Must NOT contain flood() with two arguments
     expect(query).not.toMatch(/flood\([^)]+,[^)]+\)/);
   });
 
   test('buildWorkReportQuery produces a snapshot-stable query for multiple hosts', () => {
-    const query = buildWorkReportQuery(['laptop', 'desktop'], '[]', [['Work']]);
+    const query = buildWorkReportQuery(
+      queryParams(['laptop', 'desktop']),
+      [['Work']]
+    );
     expect(query).toMatchSnapshot();
   });
 
@@ -84,5 +108,78 @@ describe('workReport host helpers', () => {
     expect(getSupportedWorkReportHosts(['desktop', 'phone', 'laptop'], moreBuckets as any)).toEqual(
       ['desktop', 'laptop']
     );
+  });
+
+  test('supports a host resolved entirely from configured generic sources', () => {
+    const genericBuckets = [
+      {
+        id: 'custom-activity',
+        hostname: 'custom',
+        device_id: 'custom',
+        type: 'custom.activity',
+        data: {},
+      },
+      {
+        id: 'custom-active',
+        hostname: 'custom',
+        device_id: 'custom',
+        type: 'custom.active',
+        data: {},
+      },
+    ];
+    const compiled = {
+      category_specs: [],
+      context_sources: [],
+      activity_sources: [
+        {
+          source_id: 'activity',
+          bucket_ids: ['custom-activity'],
+          scope: 'host' as const,
+          bucket_hosts: { 'custom-activity': 'custom' },
+          field_mappings: {},
+        },
+      ],
+      background_sources: [],
+      active_time_rule: {
+        type: 'regex' as const,
+        source: 'active',
+        field: 'state',
+        regex: 'yes',
+      },
+      active_time_sources: [
+        {
+          source_id: 'active',
+          bucket_ids: ['custom-active'],
+          scope: 'host' as const,
+          bucket_hosts: { 'custom-active': 'custom' },
+        },
+      ],
+      capabilities: [
+        'query.categorize_v2.v1',
+        'query.map_event_fields.v1',
+        'query.active_periods_v2.v1',
+      ],
+    };
+
+    expect(getWorkReportHostOptions(genericBuckets as any, compiled)).toEqual([
+      { value: 'custom', text: 'custom', disabled: false },
+    ]);
+
+    const query = buildWorkReportQuery(
+      {
+        hosts: ['custom'],
+        host_params: { custom: { bid_window: undefined, bid_afk: undefined } },
+        filter_afk: true,
+        categories: [],
+        filter_categories: [],
+        always_active_pattern: '',
+        ...compiled,
+      },
+      []
+    );
+    expect(query).toContain('query_bucket_optional("custom-activity")');
+    expect(query).toContain('query_bucket_optional("custom-active")');
+    expect(query).not.toContain('aw-watcher-window');
+    expect(query).not.toContain('aw-watcher-afk');
   });
 });

@@ -2,8 +2,27 @@ import moment from 'moment';
 import { seconds_to_duration } from './time';
 import DOMPurify from 'dompurify';
 import _ from 'lodash';
+import { i18n } from '~/i18n';
 
 const sanitize = DOMPurify.sanitize;
+
+function formatTooltipValue(value) {
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (value === undefined) {
+    return 'undefined';
+  }
+  return JSON.stringify(value);
+}
+
+function buildDataRows(data) {
+  const rows = Object.entries(data).map(
+    ([key, value]) =>
+      `<tr><th>${sanitize(key)}</th><td>${sanitize(formatTooltipValue(value))}</td></tr>`
+  );
+  return rows.length > 0 ? rows.join('') : '<tr><th>Data</th><td>{}</td></tr>';
+}
 
 export function buildTooltip(bucket, e) {
   // WARNING: XSS risk, make sure to sanitize properly
@@ -41,10 +60,19 @@ export function buildTooltip(bucket, e) {
     inner = `
       <tr><th>Label</th><td>${sanitize(e.data.label)}</td></tr>
       `;
-  } else {
+  } else if (bucket.type === 'category-result') {
+    const category = Array.isArray(e.data.$category)
+      ? e.data.$category.join(' > ')
+      : 'Uncategorized';
+    const activity = e.data.$inactive
+      ? i18n.t('timeline.inactiveStatus')
+      : i18n.t('timeline.activeStatus');
     inner = `
-      <tr><th>Data</th><td>${sanitize(JSON.stringify(e.data))}</td></tr>
+      <tr><th>Category</th><td>${sanitize(category)}</td></tr>
+      <tr><th>Status</th><td>${sanitize(activity)}</td></tr>
       `;
+  } else {
+    inner = buildDataRows(e.data);
   }
   return `<table>
     <tr></tr>

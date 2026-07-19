@@ -44,7 +44,9 @@ div
 <script lang="ts">
 import _ from 'lodash';
 import moment from 'moment';
-import { canonicalEvents } from '~/queries';
+import { queryStringToArray, resolveActivityProfile } from '~/queries';
+import { useBucketsStore } from '~/stores/buckets';
+import { useSettingsStore } from '~/stores/settings';
 
 import 'vue-awesome/icons/search';
 import 'vue-awesome/icons/spinner';
@@ -71,16 +73,21 @@ export default {
   },
   methods: {
     search: async function () {
-      let query = canonicalEvents({
-        bid_window: 'aw-watcher-window_' + this.queryOptions.hostname,
-        bid_afk: 'aw-watcher-afk_' + this.queryOptions.hostname,
+      const advanced = useSettingsStore().compiledRulesV2;
+      const bucketsStore = useBucketsStore();
+      await bucketsStore.ensureLoaded();
+      let query = resolveActivityProfile({
+        hostname: this.queryOptions.hostname,
+        bid_window: bucketsStore.bucketsWindow(this.queryOptions.hostname)[0],
+        bid_afk: bucketsStore.bucketsAFK(this.queryOptions.hostname)[0],
         filter_afk: this.queryOptions.filter_afk,
         categories: [[['searched'], { type: 'regex', regex: this.pattern }]],
         filter_categories: [['searched']],
+        ...(advanced ? { ...advanced, category_specs: undefined } : {}),
       });
       query += '; RETURN = events;';
 
-      const query_array = query.split(';').map(s => s.trim() + ';');
+      const query_array = queryStringToArray(query);
       const timeperiods = [
         moment(this.queryOptions.start).format() + '/' + moment(this.queryOptions.stop).format(),
       ];

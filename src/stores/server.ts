@@ -7,6 +7,7 @@ interface State {
     device_id: string;
     version: string;
     testing: boolean;
+    capabilities?: string[];
   };
 }
 

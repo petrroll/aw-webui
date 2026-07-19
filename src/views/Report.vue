@@ -85,12 +85,13 @@ import 'vue-awesome/icons/spinner';
 import 'vue-awesome/icons/angle-double-down';
 import 'vue-awesome/icons/angle-double-up';
 
-import { canonicalEvents } from '~/queries';
+import { queryStringToArray, resolveActivityProfile } from '~/queries';
 import { buildBarchartDataset } from '~/util/datasets';
 
 import { useActivityStore } from '~/stores/activity';
 import { useCategoryStore } from '~/stores/categories';
 import { useBucketsStore } from '~/stores/buckets';
+import { useSettingsStore } from '~/stores/settings';
 
 import { getClient } from '~/util/awclient';
 import { downloadFile } from '~/util/export';
@@ -131,17 +132,70 @@ export default {
   },
   methods: {
     generate: async function () {
-      // TODO: use full query (one per day/timeperiod) instead of canonicalEvents
-      let query = canonicalEvents({
-        bid_window: 'aw-watcher-window_' + this.queryOptions.hostname,
-        bid_afk: 'aw-watcher-afk_' + this.queryOptions.hostname,
+      // TODO: use full query (one per day/timeperiod) instead of resolving each period separately
+      const settingsStore = useSettingsStore();
+      const compiled = settingsStore.compiledRulesV2;
+      const customRule = this.filterCategories.find(category => category[0][0] === 'searched');
+      const customRegex = customRule
+        ? {
+            type: 'regex' as const,
+            regex: customRule[1].regex,
+            ignore_case: customRule[1].ignore_case,
+          }
+        : undefined;
+      const profileSources = settingsStore.rulesV2.activity_profiles_v2[0]?.sources ?? [];
+      const searchableSources = profileSources.filter(source => source.builtin !== 'window');
+      const coverageSourceIds = new Set(
+        compiled?.activity_coverage_sources.map(source => source.source_id) ?? []
+      );
+      const reportContextSources = searchableSources
+        .filter(source => !coverageSourceIds.has(source.id))
+        .map(source => ({
+          source_id: source.id,
+          bucket_ids: source.bucket_ids,
+          scope: source.scope,
+          bucket_hosts: source.bucket_hosts,
+          fields: source.fields,
+          conflict: 'base_wins' as const,
+          host: source.host,
+        }));
+      const searchableSourceIds = searchableSources.map(source => source.id);
+      let query = resolveActivityProfile({
+        hostname: this.queryOptions.hostname,
+        bid_window: this.bucketsStore.bucketsWindow(this.queryOptions.hostname)[0],
+        bid_afk: this.bucketsStore.bucketsAFK(this.queryOptions.hostname)[0],
         filter_afk: this.queryOptions.filter_afk,
         categories: this.filterCategories,
         filter_categories: this.filterCategories.map(c => c[0]),
+        ...(compiled ?? {}),
+        ...(customRule && compiled
+          ? {
+              context_sources: reportContextSources,
+              category_specs: [
+                {
+                  id: 'report-search',
+                  name: ['searched'],
+                  rule:
+                    searchableSourceIds.length > 0
+                      ? {
+                          type: 'any',
+                          rules: [
+                            customRegex,
+                            ...searchableSourceIds.map(source => ({
+                              ...customRegex,
+                              source,
+                            })),
+                          ],
+                        }
+                      : customRegex,
+                },
+              ],
+            }
+          : {}),
       });
       query += '; RETURN = events;';
 
-      const query_array = query.split(';').map(s => s.trim() + ';');
+      const query_array = queryStringToArray(query);
       const start = moment(this.queryOptions.start).format();
       const end = moment(this.queryOptions.stop).format();
       const timeperiods = [start + '/' + end];

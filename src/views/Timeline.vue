@@ -92,6 +92,9 @@ div
     div.timeline-chip.mr-2.text-muted
       | {{ num_events }} {{ $t('timeline.eventsShown') }}
 
+    small.text-muted.mr-3(v-if="hasCategoryResult")
+      | {{ $t('timeline.inactiveLegend') }}
+
     small.text-muted.ml-auto
       | {{ $t('timeline.scrollHint') }}
 
@@ -99,7 +102,13 @@ div
     | {{ $t('timeline.noEvents') }}
 
   div(v-if="buckets !== null")
-    vis-timeline(:buckets="buckets", :showRowLabels='true', :queriedInterval="daterange", :swimlane="swimlane", :updateTimelineWindow='updateTimelineWindow')
+    vis-timeline(
+      :buckets="buckets"
+      :showRowLabels="true"
+      :queriedInterval="daterange"
+      :swimlane="swimlane"
+      :updateTimelineWindow="updateTimelineWindow"
+    )
 
     aw-devonly(reason="Not ready for production, still experimenting")
       aw-calendar(:buckets="buckets")
@@ -115,11 +124,16 @@ import { mapState } from 'pinia';
 import { useSettingsStore } from '~/stores/settings';
 import { useBucketsStore } from '~/stores/buckets';
 import { getClient } from '~/util/awclient';
-import { canonicalEvents } from '~/queries';
+import { queryStringToArray, resolveActivityProfile } from '~/queries';
+import { hostCanResolveProfile, hostHasResolvedActiveTime } from '~/util/activityProfile';
 import { useCategoryStore } from '~/stores/categories';
-import { matchString } from '~/util/classes';
-import { getCategorizationStringFromEvent } from '~/util/color';
 import { seconds_to_duration } from '~/util/time';
+import {
+  buildTimelineCategoryColorResolver,
+  buildTimelineCategoryQuery,
+  filterTimelineBucketsByPeriods,
+  splitCategoryEventsByActivity,
+} from '~/util/timelineCategories';
 
 export default {
   name: 'Timeline',
@@ -144,9 +158,13 @@ export default {
         { value: 'bucketType', text: 'Group by bucket type' },
       ],
       updateTimelineWindow: true,
+      loadGeneration: 0,
     };
   },
   computed: {
+    hasCategoryResult() {
+      return this.buckets?.some(bucket => bucket.type === 'category-result') ?? false;
+    },
     ...mapState(useSettingsStore, ['always_active_pattern']),
     timeintervalDefaultDuration() {
       const settingsStore = useSettingsStore();
@@ -154,7 +172,10 @@ export default {
     },
     // This does not match the chartData which is rendered in the timeline, as chartData excludes short events.
     num_events() {
-      return _.sumBy(this.buckets, 'events.length');
+      return _.sumBy(
+        _.filter(this.buckets, bucket => bucket.type !== 'category-result'),
+        'events.length'
+      );
     },
     category_options() {
       const categoryStore = useCategoryStore();
@@ -222,7 +243,6 @@ export default {
     },
     swimlane() {
       this.updateTimelineWindow = false;
-      this.getBuckets();
     },
   },
   methods: {
@@ -241,21 +261,27 @@ export default {
     getBuckets: async function () {
       if (this.daterange == null) return;
 
-      this.all_buckets = Object.freeze(
-        await useBucketsStore().getBucketsWithEvents({
-          start: this.daterange[0].format(),
-          end: this.daterange[1].format(),
-        })
-      );
+      const generation = ++this.loadGeneration;
+      const bucketsStore = useBucketsStore();
+      await bucketsStore.ensureLoaded();
+      if (generation !== this.loadGeneration) return;
 
-      this.hosts = this.all_buckets
-        .map(a => a.hostname)
-        .filter((value, index, array) => array.indexOf(value) === index);
-      this.clients = this.all_buckets
-        .map(a => a.client)
-        .filter((value, index, array) => array.indexOf(value) === index);
+      this.hosts = bucketsStore.buckets
+        .map(bucket => bucket.hostname)
+        .filter((value, index, array) => value && array.indexOf(value) === index);
 
-      let buckets = this.all_buckets;
+      const categoryBucketsPromise = this._queryCategoryResultBuckets();
+      const allBuckets = await bucketsStore.getBucketsWithEvents({
+        start: this.daterange[0].format(),
+        end: this.daterange[1].format(),
+      });
+      if (generation !== this.loadGeneration) return;
+      this.all_buckets = Object.freeze(allBuckets);
+      this.clients = allBuckets
+        .map(bucket => bucket.client)
+        .filter((value, index, array) => value && array.indexOf(value) === index);
+
+      let buckets = allBuckets;
       if (this.filter_hostname) {
         buckets = _.filter(buckets, b => b.hostname == this.filter_hostname);
       }
@@ -264,34 +290,20 @@ export default {
       }
 
       if (this.filter_duration > 0) {
-        for (const bucket of buckets) {
-          bucket.events = _.filter(bucket.events, e => e.duration >= this.filter_duration);
-        }
+        buckets = buckets.map(bucket => ({
+          ...bucket,
+          events: _.filter(bucket.events, event => event.duration >= this.filter_duration),
+        }));
       }
 
-      if (this.filter_categories.length > 0) {
-        const categoryStore = useCategoryStore();
-        const allCats = categoryStore.classes;
-        for (const bucket of buckets) {
-          // Skip AFK buckets — they don't have meaningful categorization
-          if (bucket.type === 'afkstatus') continue;
-          bucket.events = _.filter(bucket.events, e => {
-            const str = getCategorizationStringFromEvent(bucket, e);
-            if (str === null) return true; // Keep events from unknown bucket types
-            const matched = matchString(str, allCats);
-            const eventCat = matched ? matched.name : ['Uncategorized'];
-            // Check if the event's category matches any selected filter category
-            // (including parent matches: selecting "Work" also shows "Work > Programming")
-            return this.filter_categories.some(filterCat =>
-              _.isEqual(eventCat.slice(0, filterCat.length), filterCat)
-            );
-          });
-        }
-      }
+      const categoryBuckets = await categoryBucketsPromise;
+      if (generation !== this.loadGeneration) return;
 
-      // AFK filtering: use query engine to filter window events by AFK status
       if (this.filter_afk) {
-        buckets = await this._applyAfkFilter(buckets);
+        buckets = this._filterBucketsByTimelinePeriods(buckets, categoryBuckets, {
+          activeOnly: true,
+          keepAfkBuckets: false,
+        });
       }
 
       // Merge adjacent events by app name for window buckets.
@@ -302,7 +314,113 @@ export default {
         buckets = this._applyMergeSimilar(buckets);
       }
 
-      this.buckets = buckets;
+      if (this.filter_categories.length > 0) {
+        buckets = this._filterBucketsByCategoryPeriods(buckets, categoryBuckets);
+      }
+      this.buckets = [...categoryBuckets, ...buckets];
+    },
+
+    _filterBucketsByCategoryPeriods: function (buckets, categoryBuckets) {
+      return this._filterBucketsByTimelinePeriods(buckets, categoryBuckets, {
+        activeOnly: false,
+        keepAfkBuckets: true,
+      });
+    },
+
+    _filterBucketsByTimelinePeriods: function (
+      buckets,
+      categoryBuckets,
+      { activeOnly, keepAfkBuckets }
+    ) {
+      return filterTimelineBucketsByPeriods(buckets, categoryBuckets, {
+        activeOnly,
+        keepAfkBuckets,
+      });
+    },
+
+    async _queryCategoryResultBuckets() {
+      const bucketsStore = useBucketsStore();
+      const settingsStore = useSettingsStore();
+      const categoryStore = useCategoryStore();
+      const visibleHosts = this.filter_hostname ? [this.filter_hostname] : this.hosts;
+      const advanced = settingsStore.compiledRulesV2;
+      const eligibleHosts = visibleHosts.filter(hostname =>
+        hostCanResolveProfile({
+          host: hostname,
+          buckets: bucketsStore.buckets,
+          compiled: advanced,
+          filterAfk: false,
+        })
+      );
+      const categoryColor = buildTimelineCategoryColorResolver(
+        settingsStore.rulesV2.category_sets_v2[0]
+      );
+      const results = await Promise.all(
+        eligibleHosts.map(async hostname => {
+          const windowBucketIds = bucketsStore.bucketsWindow(hostname);
+          const afkBucketIds = bucketsStore.bucketsAFK(hostname);
+
+          try {
+            const profile = settingsStore.rulesV2.activity_profiles_v2[0];
+            const activeTime = profile?.active_time;
+            const queryCode = buildTimelineCategoryQuery(
+              resolveActivityProfile({
+                hostname,
+                bid_window: windowBucketIds[0],
+                bid_afk: afkBucketIds[0],
+                bid_browsers: bucketsStore.bucketsBrowser(hostname),
+                bid_stopwatch: bucketsStore.bucketsStopwatch(hostname)[0],
+                filter_afk: false,
+                include_audible:
+                  activeTime?.type === 'legacy' ? activeTime.include_audible : undefined,
+                always_active_pattern: this.always_active_pattern || undefined,
+                categories: categoryStore.classes_for_query,
+                filter_categories:
+                  this.filter_categories.length > 0 ? this.filter_categories : null,
+                ...(advanced ?? {}),
+              })
+            );
+            const period = `${this.daterange[0].format()}/${this.daterange[1].format()}`;
+            const data = await getClient().query([period], queryStringToArray(queryCode));
+            const result = data[0] ?? {};
+            const hasActiveTime = hostHasResolvedActiveTime(
+              hostname,
+              bucketsStore.buckets,
+              advanced
+            );
+            const categoryEvents = result.all ?? [];
+            const activeEvents = hasActiveTime ? result.active ?? [] : categoryEvents;
+            const events = splitCategoryEventsByActivity(categoryEvents, activeEvents).map(
+              event => {
+                const category = event.data?.['$category'] ?? ['Uncategorized'];
+                return {
+                  ...event,
+                  data: {
+                    ...event.data,
+                    $category: category,
+                    $color: categoryColor(category),
+                  },
+                };
+              }
+            );
+            const label = String(this.$t('timeline.categoryResult'));
+            return {
+              id: `category-result:${hostname}`,
+              hostname,
+              type: 'category-result',
+              data: {
+                label,
+              },
+              events,
+            };
+          } catch (error) {
+            console.warn(`Category result query failed for ${hostname}:`, error);
+            return null;
+          }
+        })
+      );
+
+      return results.filter(Boolean);
     },
 
     // Merges adjacent events with the same app name within window buckets.
@@ -341,67 +459,6 @@ export default {
 
         return { ...bucket, events: merged };
       });
-    },
-
-    // Replaces raw window bucket events with AFK-filtered events via aw query engine.
-    // Also hides AFK status buckets since they're used for filtering, not display.
-    _applyAfkFilter: async function (buckets) {
-      const bucketsStore = useBucketsStore();
-      const result = [];
-
-      for (const bucket of buckets) {
-        // Hide AFK status buckets when AFK filtering is active
-        if (bucket.type === 'afkstatus') {
-          continue;
-        }
-
-        // For window buckets, replace events with AFK-filtered query results
-        if (bucket.type === 'currentwindow' && bucket.hostname) {
-          const afkBucketIds = bucketsStore.bucketsAFK(bucket.hostname);
-          if (afkBucketIds.length > 0) {
-            try {
-              const filteredEvents = await this._queryAfkFilteredEvents(bucket.id, afkBucketIds[0]);
-              // Create a copy with filtered events to avoid mutating frozen all_buckets
-              result.push({ ...bucket, events: filteredEvents });
-              continue;
-            } catch (e) {
-              console.warn('AFK filter query failed, falling back to raw events:', e);
-            }
-          }
-        }
-
-        // Keep other buckets unchanged
-        result.push(bucket);
-      }
-
-      return result;
-    },
-
-    // Runs a canonicalEvents query to get window events filtered by AFK status,
-    // respecting the user's always_active_pattern setting.
-    _queryAfkFilteredEvents: async function (windowBucketId, afkBucketId) {
-      const queryCode =
-        canonicalEvents({
-          bid_window: windowBucketId,
-          bid_afk: afkBucketId,
-          filter_afk: true,
-          always_active_pattern: this.always_active_pattern || undefined,
-          categories: [],
-          filter_categories: null,
-        }) + '\nRETURN = events;';
-
-      const queryArray = queryCode
-        .split(';')
-        .map(s => s.trim())
-        .filter(s => s)
-        .map(s => s + ';');
-
-      const start = this.daterange[0].format();
-      const end = this.daterange[1].format();
-      const timeperiods = [`${start}/${end}`];
-
-      const data = await getClient().query(timeperiods, queryArray);
-      return data[0] || [];
     },
   },
 };

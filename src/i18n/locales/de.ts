@@ -6,7 +6,7 @@ export default {
     activity: 'Aktivität',
     loading: 'Laden…',
     noActivityReports:
-      'Keine Aktivitätsberichte verfügbar. Stellen Sie sicher, dass AFK- und Fenster-Watcher laufen.',
+      'Keine Aktivitätsberichte verfügbar. Stellen Sie sicher, dass ein aktivitätserzeugender Watcher läuft und die Aktivzeit-Einstellungen diesen Zeitraum zulassen.',
     timeline: 'Zeitleiste',
     stopwatch: 'Stoppuhr',
     tools: 'Werkzeuge',
@@ -37,6 +37,7 @@ export default {
   common: {
     loading: 'Laden…',
     save: 'Speichern',
+    apply: 'Übernehmen',
     cancel: 'Abbrechen',
     confirm: 'Bestätigen',
     import: 'Importieren',
@@ -61,7 +62,8 @@ export default {
   },
   settings: {
     title: 'Einstellungen',
-    unsavedCategoriesLeave: 'Ihre Kategorien haben ungespeicherte Änderungen. Wirklich verlassen?',
+    unsavedCategoriesLeave:
+      'Ihre Kategorisierungsregeln haben ungespeicherte Änderungen. Wirklich verlassen?',
     daystart: {
       startOfDay: 'Tagesbeginn',
       startOfDayHelp:
@@ -119,10 +121,12 @@ export default {
       title: 'Immer als aktiv zählen (Regex)',
       help1: 'Apps oder Titel, die diesem Regex entsprechen, werden nie als AFK gezählt.',
       help2:
-        'Nützlich für Meetings oder Controller-Spiele ohne Tastatur/Maus-Eingabe. Leerer String deaktiviert die Regel.',
+        'Dieser reguläre Ausdruck wird mit dem App-Namen und Fenstertitel des aktiven Fensters verglichen. Bei einer Übereinstimmung wird diese Zeit auch dann als aktiv gezählt, wenn der AFK-Watcher AFK meldet; aktive Zeit wird dadurch niemals entfernt. Leer lassen, um diese Ausnahme zu deaktivieren.',
       example: 'Beispielausdruck:',
       invalid: 'Ungültiges Muster',
       tooBroad: 'Muster zu allgemein',
+      enabled: 'Aktiviert',
+      disabled: 'Deaktiviert',
     },
     categorization: {
       title: 'Kategorisierung',
@@ -136,11 +140,9 @@ export default {
       forum: 'Forum',
       docsIntro: 'Hilfe zum Schreiben von Regeln finden Sie in der',
       documentation: 'Dokumentation',
-      categorySet: 'Kategoriesatz:',
-      newSet: 'Neuer Satz',
-      deleteSet: 'Satz löschen',
-      setsAvailable: '{count} Sätze verfügbar — wechseln Sie zwischen Regelprofilen.',
       unsavedChanges: 'Ungespeicherte Änderungen!',
+      importReplaceConfirm:
+        'Der Import ersetzt die aktuellen Kategorisierungsregeln, Quellen und Aktivzeit-Einstellungen. Fortfahren?',
       discard: 'Verwerfen',
       addCategory: 'Kategorie hinzufügen',
       categories: 'Kategorien',
@@ -148,6 +150,250 @@ export default {
       builderSubtitle: 'Regeln aus unkategorisierter Aktivität erzeugen',
       openBuilder: 'Builder öffnen',
       hideBuilder: 'Builder ausblenden',
+      editorModeTitle: 'Editormodus',
+      editorModeHelp:
+        'Wählen Sie, wie Sie Kategorisierungsregeln bearbeiten möchten. Ein Editorwechsel deaktiviert keine Regeln.',
+      editorModeSimple: 'Einfach',
+      editorModeAdvanced: 'Erweitert',
+      editorModeHintTitle: 'Einfach oder Erweitert',
+      editorModeHintSimple:
+        'Einfach deckt übliche App-/Titel-Regeln mit regulären Ausdrücken ab, eine Regel pro Kategorie.',
+      editorModeHintAdvanced:
+        'Erweitert bietet UND/ODER-Bedingungen, Treffergewichte, Gleichstands-Priorität, Voraussetzungen, eigene Quellen und erweiterte Aktivzeitregeln.',
+      editorModeHintSwitch:
+        'Der Wechsel zu Erweitert ändert oder löscht nichts. Sie können ohne Änderungen zu Einfach zurückkehren, solange alle Einstellungen dort darstellbar sind.',
+      editorModeHintLossless:
+        'Ihre aktuellen Regeln passen in den einfachen Editor. Sie können ohne Verluste zurückwechseln.',
+      editorModeHintHasChanges: 'Bei der Rückkehr zu Einfach würde sich Folgendes ändern:',
+      editorModeHintCategory: '{category}: {reasons}.',
+      editorModeHintReasonRule: 'verwendet eine erweiterte Regel',
+      editorModeHintReasonPriority: 'hat eine Gleichstands-Priorität',
+      editorModeHintReasonPrerequisites: 'erfordert übergeordnete Kategorien',
+      editorModeHintMoreCategories: '+{count} weitere Kategorien',
+      editorModeHintActiveTime:
+        'Aktivzeit: Die benutzerdefinierte Regel würde zu Automatisch zurückkehren.',
+      editorModeHintSources: 'Erweiterte Watcher-Datenauswahlen würden entfernt: {sources}.',
+      editorModeHintReview: 'Vor jeder Änderung sehen Sie die vollständige Liste.',
+      editorModeHintUnsaved:
+        'Speichern oder verwerfen Sie Ihre Änderungen, bevor Sie den Editor wechseln.',
+      downgradeTitle: 'Zum einfachen Editor wechseln?',
+      downgradeHelp:
+        'Diese Einstellungen können im einfachen Editor nicht dargestellt werden. Beim Wechsel werden sie wie unten aufgeführt zurückgesetzt oder entfernt. In Erweitert bleibt alles unverändert.',
+      downgradeCategories: 'Kategorien',
+      downgradeReasonRule:
+        'Die Regel kann im einfachen Editor nicht dargestellt werden und wird zurückgesetzt.',
+      downgradeReasonPriority: 'Eine Kategoriepriorität ungleich null wird entfernt.',
+      downgradeReasonPrerequisites: 'Voraussetzungen werden entfernt.',
+      downgradeActiveTime: 'Aktivzeitregel',
+      downgradeActiveTimeReason:
+        'Die Aktivzeit-Ausdrucksregel wird auf das AFK-Verhalten zurückgesetzt.',
+      downgradeSources: 'Von erweiterten Regeln verwendete Watcher-Daten',
+      downgradeSourcesHelp:
+        'Dies sind Watcher- oder Bucket-Auswahlen, die erweiterte Regeln lesen können. Der einfache Editor kann sie nicht verwenden; beim Wechsel werden diese Auswahlen entfernt und die oben aufgeführten betroffenen Regeln zurückgesetzt.',
+      downgradeSourceItem: '{label}',
+      downgradeConfirm: 'Wechseln und diese verwerfen',
+      simpleRuleLocked:
+        'Diese Kategorie kann nicht mit einfachen Steuerelementen bearbeitet werden. Wechseln Sie zum erweiterten Editormodus.',
+      simpleActiveTimeLocked:
+        'Diese Aktivzeitregel ist gesperrt. Wechseln Sie zum erweiterten Editormodus.',
+      activeTimeTitle: 'Aktivzeit',
+      activeTimeHelp:
+        'Legen Sie fest, wie ActivityWatch entscheidet, ob erfasste Zeit aktiv oder AFK ist.',
+      activeTimeAutomatic: 'Automatisch',
+      activeTimeAutomaticRecommended: 'Automatisch (empfohlen)',
+      activeTimeAutomaticHelp:
+        'Zeit wird als aktiv gezählt, solange der AFK-Watcher Tastatur- oder Mauseingaben erkennt, und nach der konfigurierten Zeit ohne Eingabe als AFK. Wenn „Hörbaren Browser-Tab als aktiv zählen“ aktiviert ist, wird Zeit auch ohne Eingabe als aktiv gezählt, solange der Browser im Vordergrund Audio wiedergibt.',
+      activeTimeAutomaticPending:
+        'Ihre benutzerdefinierte Regel bleibt aktiv, bis Sie den Wechsel zu Automatisch bestätigen.',
+      activeTimeCustom: 'Benutzerdefinierte Regel',
+      activeTimeCustomHelp:
+        'Erstellen Sie einen Ausdruck über Watcher-Daten. Nach dem Speichern ersetzt er die automatische AFK- und Audioauswertung.',
+      activeTimeCustomPending:
+        'Automatisch bleibt aktiv, bis diese Regel gültig ist und gespeichert wurde.',
+      useAutomaticActiveTime: 'Automatisch verwenden',
+      useAutomaticActiveTimeConfirm:
+        'Beim Wechsel zu Automatisch wird die benutzerdefinierte Aktivzeitregel verworfen. Fortfahren?',
+      discardCustomActiveTimeDraftConfirm:
+        'Ungespeicherte benutzerdefinierte Aktivzeitregel verwerfen und zu Automatisch zurückkehren?',
+      saveCustomActiveTime: 'Benutzerdefinierte Regel speichern',
+      sourcesTitle: 'Quellen für erweiterte Regeln',
+      manageSources: 'Quellen verwalten',
+      hideSources: 'Quellen ausblenden',
+      sourcesHelp: 'Definieren Sie Watcher-Buckets für erweiterte Kategorie- und Aktivzeitregeln.',
+      sourceNamespaceRequired:
+        'Dieser Server kann Watcher-Daten noch nicht an Aktivitäten anhängen. Aktualisieren Sie den Server, bevor Sie Quellen verwalten.',
+      previewTitle: 'Erklärung und Vorschau',
+      openPreview: 'Vorschau öffnen',
+      hidePreview: 'Vorschau ausblenden',
+      previewHelp:
+        'Testen Sie aktuelle Ereignisse und sehen Sie Gewinner, weitere Treffer, Gewichtungen, Voraussetzungen und den gewählten ODER-Zweig.',
+      previewEmpty: 'In diesem Zeitraum wurden keine passenden Ereignisse gefunden.',
+      previewNoFields: 'Keine anzeigbaren Felder',
+      previewAction: 'Vorschau',
+      previewUnavailable:
+        'Regelerklärungen benötigen einen Server mit Unterstützung für Diagnose-Kategorisierung.',
+      previewColEvent: 'Ereignis',
+      previewColCategory: 'Kategorie',
+      previewColDetails: 'Details',
+      previewUncategorized: 'Unkategorisiert',
+      previewCandidateScore: '— Gewichtung {score}',
+      previewWinner: 'Gewinner',
+      previewPrerequisiteNotMet: 'Voraussetzung nicht erfüllt',
+      previewLostTiebreak: 'Gleichstand verloren',
+      previewOrBranch: ', ODER-Zweig {branch}',
+      validationReview: 'Prüfen Sie vor dem Speichern diese Einstellungen:',
+      validationSourceBucketsRequired:
+        'Die Quelle „{source}“ benötigt mindestens einen Watcher-Bucket.',
+      validationSourceFieldsRequired: 'Die Quelle „{source}“ benötigt mindestens ein Feld.',
+      validationSourceBucketsUnique:
+        'Die Quelle „{source}“ enthält denselben Watcher-Bucket mehrfach.',
+      validationSourceId: 'Die Quelle „{source}“ hat eine ungültige oder doppelte interne ID.',
+      validationSourceOwnership:
+        'Die Quelle „{source}“ hat eine unvollständige Gerätezuordnung. Wählen Sie die Buckets erneut oder verwenden Sie Jedes Gerät.',
+      validationPatternRequired: 'Geben Sie einen regulären Ausdruck ein.',
+      validationPatternInvalid: 'Geben Sie einen gültigen regulären Ausdruck ein.',
+      validationPatternTooLong: 'Dieser reguläre Ausdruck ist zu lang.',
+      validationWholeNumber: 'Gewichtungen und Prioritäten müssen ganze Zahlen sein.',
+      validationGroupRequired: 'Fügen Sie dieser Gruppe mindestens eine Bedingung hinzu.',
+      validationActiveTimeSource: 'Wählen Sie für jede Aktivzeitbedingung eine Quelle.',
+      validationGeneric: 'Prüfen Sie diese Einstellung: {error}',
+      profileUnavailable: 'Es ist kein Aktivitätsprofil verfügbar.',
+      ruleUnknownSource: 'Diese Regel verweist auf eine nicht verfügbare Quelle: {source}.',
+      advancedRulesNotApplied:
+        'Erweiterte Regeln werden nicht angewendet, weil dieser Server die erforderlichen flexiblen Regeln nicht unterstützt. Stattdessen werden einfache Ergebnisse angezeigt.',
+      openRulesSettings: 'Regeleinstellungen öffnen.',
+      noResolvedActivityHost:
+        'Kein Gerät verfügt derzeit über genügend Watcher-Daten, um Aktivität aufzulösen.',
+      activitySetupHelp:
+        'Starten Sie einen aktivitätserzeugenden Watcher oder konfigurieren Sie eine Quelle, die Aktivitätszeiträume erzeugen kann.',
+      noWatcherDataHost:
+        'Noch kein Gerät verfügt über Watcher-Daten. Starten Sie einen Watcher, um Aktivitätsdaten zu erfassen.',
+      importJsonOnly: 'Es können nur JSON-Dateien importiert werden.',
+      importFormatUnknown: 'Das Format des Kategorieimports wird nicht erkannt.',
+      editCategory: 'Kategorie bearbeiten',
+      bucketLabelWindow: 'App & Fenster',
+      bucketLabelAfk: 'AFK-Status',
+      bucketLabelBrowser: 'Browser-Tabs',
+      bucketLabelStopwatch: 'Stoppuhr',
+      bucketLabelVirtualDesktop: 'Virtueller Desktop',
+      sourceBucketUnavailable: 'Der ausgewählte Watcher-Bucket ist nicht mehr verfügbar.',
+      sourceBucketsNeedHosts: 'Jeder ausgewählte Watcher-Bucket muss einem Host zugeordnet sein.',
+      restoreDefaultsConfirm:
+        'Standardkategorien wiederherstellen? Dadurch werden erweiterte Regeln, Voraussetzungen und Quellverweise entfernt.',
+      sourceLabel: 'Name',
+      builtinWindowSourceLabel: 'App & Fenster',
+      builtinWindowSourceHelp:
+        'Integriert. ActivityWatch löst diese Quelle für jedes Gerät separat auf. AFK wird unter Aktivzeit konfiguriert; andere Watcher werden bei Bedarf hinzugefügt.',
+      builtinWindowFieldsHelp:
+        'Wählen Sie die Felder für App-&-Fenster-Regeln. Standardmäßig sind dies app und title.',
+      noActivityCreatingSourceWarning:
+        'Derzeit kann keine Quelle Aktivitätszeiträume erzeugen. Kategorien haben keine Zeit zum Klassifizieren, bis mindestens eine Quelle aktiviert ist.',
+      sourceCreatesActivityEnabled: 'Kann Aktivitätszeiträume erzeugen',
+      sourceCreatesActivityHelp:
+        'Diese profilweite Einstellung lässt diesen Watcher überall als erfasste Aktivität zählen. Regeln können in beiden Fällen darauf verweisen; überlappende Quellen bleiben erhalten.',
+      activityCoverageUnavailable:
+        'Dieser Server kann aus benutzerdefinierten Quellen keine Aktivitätszeiträume erzeugen.',
+      sourceInternalId: 'Interne ID',
+      sourceBucketIds: 'Watcher-Buckets',
+      sourceBucketIdsHelp: 'Exakte Bucket-IDs, durch Kommas getrennt.',
+      sourceBucketOwner: '{bucket} — Gerät: {host}',
+      sourceBucketsUnavailable: 'Derzeit nicht verfügbar: {buckets}',
+      sourceBucketRequired: 'Wählen Sie mindestens einen Watcher-Bucket aus.',
+      sourceScope: 'Gerätebereich',
+      sourceScopeHost: 'Nur auf dem zugehörigen Gerät verwenden',
+      sourceScopeGlobal: 'Auf jedem Gerät verwenden',
+      sourceScopeGlobalHelp: 'Diese Quelle auf jedem Gerät verwenden.',
+      sourceScopeHostHelp: 'Die Gerätezuordnung folgt den Watcher-Metadaten.',
+      removeSource: 'Quelle entfernen',
+      addSource: 'Quelle hinzufügen',
+      winningScore: 'Gewinnergewichtung',
+      previewSummary: '{matched} Kategorien passend, {lost} unterlegen',
+      weightHelp:
+        'Jede passende Regel trägt ihr Gewicht bei. Alle (UND) addiert die Gewichte; Eine Regel (ODER) verwendet nur den höchstbewerteten passenden Zweig. Die Kategorie mit der höchsten Summe gewinnt.',
+      noneRuleWarning: 'Diese Kategorie hat keine Trefferregel und kann nie Ereignisse erfassen.',
+      ruleSummaryNone: 'Keine Regel',
+      ruleSummaryMatches: 'Passt auf',
+      ruleSummaryExcludes: 'Schließt aus',
+      ruleSummaryAll: 'Alle',
+      ruleSummaryAny: 'Eine',
+      ruleSummaryAnd: 'UND',
+      ruleSummaryOr: 'ODER',
+      ruleSummarySource: 'Quelle',
+      ruleSummaryFields: 'Felder',
+      ruleSummaryHost: 'Computer',
+      ruleSummaryWeight: 'Gewicht',
+      ruleSummaryScalar: 'Text, Zahlen und Wahrheitswerte',
+      emptyConditionWarning: 'Diese Bedingung ist nicht konfiguriert und wird nie passen.',
+      replaceGroupConfirm:
+        'Beim Ändern dieser Gruppe werden die anderen Bedingungen verworfen. Fortfahren?',
+      resetConditionConfirm:
+        'Zu den Standard-App-/Fensterdaten wechseln und die erweiterten Optionen dieser Bedingung verwerfen?',
+      categoryPriority: 'Priorität bei Gleichstand',
+      categoryPriorityHelp:
+        'Wird nur bei gleicher Gesamtgewichtung verwendet. Ein höherer Wert gewinnt und wird nicht zur Gewichtung addiert.',
+      prerequisites: 'Diese übergeordneten Kategorien müssen ebenfalls passen',
+      prerequisitesHelp:
+        'Diese Regel gilt nur, wenn alle ausgewählten übergeordneten Kategorien ebenfalls passen; sie beeinflussen die Gewichtung nicht.',
+      prerequisiteUnavailableWithoutRule:
+        'Diese übergeordnete Kategorie hat keine Trefferregel und kann die Voraussetzung daher nie erfüllen. Geben Sie ihr zuerst eine Regel.',
+      prerequisiteSelectedWithoutRule:
+        'Diese erforderliche übergeordnete Kategorie hat derzeit keine Trefferregel. Die Kategorie kann deshalb nicht passen. Geben Sie der übergeordneten Kategorie eine Regel oder entfernen Sie die Voraussetzung.',
+      prerequisiteMissingRule: 'Übergeordnete Kategorie hat keine Regel',
+      noPrerequisites: 'Diese Kategorie hat keine übergeordneten Kategorien als Voraussetzung.',
+      advancedBackendRequired:
+        'Erweiterte Regeln benötigen einen Server mit Unterstützung für flexible Kategorisierung.',
+      ruleType: 'Regeltyp',
+      ruleNone: 'Keine',
+      ruleRegex: 'Regulärer Ausdruck',
+      ruleAll: 'Alle Regeln (UND)',
+      ruleAny: 'Eine Regel (ODER)',
+      pattern: 'Muster',
+      patternPlaceholder: 'Regulärer Ausdruck',
+      source: 'Daten abgleichen mit',
+      sourceHelp:
+        'Verwenden Sie Automatisch für den üblichen Abgleich von App und Fenstertitel oder wählen Sie einen Watcher, um dessen Daten abzugleichen. Der Watcher gilt überall, wo er verfügbar ist; mit Computer unten begrenzen Sie die Regel auf einen Computer.',
+      currentActivitySource: 'App & Fenster (Standardfelder)',
+      mainActivityAdvanced: 'App & Fenster — Felder und Optionen wählen',
+      mainActivityAdvancedHelp:
+        'Verwendet denselben App- und Fenstereintrag wie Automatisch, erlaubt aber die Auswahl von Feldern, Computer, Ausschlüssen und Treffergewicht.',
+      automaticSourceHelp:
+        'Prüft den Namen der aktiven App und den Fenstertitel. Für andere Daten wie Browser-URL oder virtuellen Desktop wählen Sie oben den entsprechenden Watcher.',
+      savedSources: 'Benutzerdefinierte Datenquellen',
+      savedWatcherSelections: 'Derzeit nicht verfügbare Watcher-Daten',
+      availableWatcherData: 'Watcher-Daten',
+      allDevices: 'Alle Geräte',
+      sourceAvailableOn: 'verfügbar auf {hosts}',
+      sourceDeviceUnknown: 'Gerät nicht gemeldet',
+      sourceWatcherDetails: '{availability}. Regel-Computer: {host}.',
+      fields: 'Felder',
+      sourceFieldsHelp: 'Regeln können diese als $source.{source}.<field> verwenden.',
+      fieldsHelp:
+        'Verwenden Sie alle Textfelder oder wählen Sie bestimmte Felder aus den Ereignisdaten. Erkannte Felder werden automatisch aufgelistet; eigene Schlüssel können hinzugefügt werden.',
+      allFields: 'Alle Textfelder',
+      specificFields: 'Bestimmte Felder',
+      specificFieldsHelp:
+        'Wählen Sie mindestens ein Feld. Wechseln Sie zu Alle Textfelder, um die Auswahl zu löschen.',
+      scalarField: 'Zahl / Wahrheitswert',
+      customFieldPlaceholder: 'Eigenen Feldschlüssel hinzufügen',
+      addField: 'Hinzufügen',
+      host: 'Computer',
+      hostHelp: 'Begrenzt diese Regel auf einen Computer. Leer lassen für beliebige Computer.',
+      anyHost: 'Beliebiger Computer',
+      caseInsensitive: 'Groß-/Kleinschreibung ignorieren',
+      excludeMatches: 'Passende Ereignisse ausschließen',
+      priorityWeight: 'Treffergewicht',
+      priorityWeightHelp:
+        'Wird in Alle (UND) zur Kategoriegewichtung addiert. In Eine Regel (ODER) zählt nur der höchstbewertete passende Zweig.',
+      maximumScore: 'Maximale Gewichtung',
+      groupScoreHelp:
+        'Alle (UND) addiert Kindgewichte. Eine Regel (ODER) verwendet das höchste Kindgewicht.',
+      sourceInferenceWarning:
+        'Aktuelle Ereignisse für {buckets} konnten nicht geprüft werden; stattdessen werden übliche Felder angezeigt.',
+      allGroupHelp: 'Alle folgenden Regeln müssen passen. Ihre Treffergewichte werden addiert.',
+      anyGroupHelp:
+        'Mindestens eine folgende Regel muss passen. Nur der höchstbewertete Treffer zählt.',
+      addRule: 'Bedingung hinzufügen',
+      removeRule: 'Bedingung entfernen',
     },
     developer: {
       title: 'Entwicklereinstellungen',
@@ -347,7 +593,11 @@ export default {
     topBucketData: 'Top-Bucket-Daten',
   },
   timeline: {
+    activeStatus: 'Aktiv',
+    inactiveStatus: 'Inaktiv (nicht gezählt)',
+    inactiveLegend: 'Gestreifte Kategoriezeit ist inaktiv und wird nicht gezählt.',
     title: 'Zeitleiste',
+    categoryResult: 'Kategorie',
     eventsShown: 'Angezeigte Ereignisse:',
     swimlanes: 'Schwimmbahnen:',
     filterAfk: 'AFK filtern',
@@ -386,6 +636,13 @@ export default {
   workReport: {
     title: 'Arbeitszeitbericht',
     loading: 'Laden…',
+    selectHost: 'Wählen Sie mindestens ein Gerät aus.',
+    selectCategory: 'Wählen Sie mindestens eine Kategorie aus.',
+    unsupportedHosts:
+      'Die ausgewählten Geräte haben nicht die für dieses Profil erforderlichen Aktivitäts- und Aktivzeitquellen: {hosts}.',
+    skippedHosts:
+      'Geräte, die dieses Aktivitätsprofil nicht auflösen können, wurden übersprungen: {skipped}. Verwendet werden: {used}.',
+    loadError: 'Der Arbeitszeitbericht konnte nicht geladen werden. Details stehen in der Konsole.',
   },
   report: {
     title: 'Bericht',

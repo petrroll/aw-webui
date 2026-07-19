@@ -4,6 +4,8 @@ import { IBucket } from '~/util/interfaces';
 import { defineStore } from 'pinia';
 import { getClient } from '~/util/awclient';
 import { useServerStore } from '~/stores/server';
+import { useSettingsStore } from '~/stores/settings';
+import { hostCanResolveProfile, hostHasResolvedActivity } from '~/util/activityProfile';
 
 function select_buckets(
   buckets: IBucket[],
@@ -32,25 +34,24 @@ export const useBucketsStore = defineStore('buckets', {
       // TODO: Include consideration of device_id UUID
       let hosts = _.uniq(_.map(state.buckets, bucket => bucket.hostname || bucket.data.hostname));
 
-      // Sort priority:
-      //   1. Host that matches the server's own hostname (the device the
-      //      webui is running on) — almost always what the user wants by
-      //      default in views like Alerts/Trends.
-      //   2. Hosts that actually have the buckets we typically query against
-      //      (window + AFK), so views don't pick a stale legacy hostname
-      //      with only one orphan bucket and then immediately error out.
-      //   3. Then by last_updated, newest first (legacy behavior).
+      // Prefer the local device, then hosts resolvable by the configured
+      // activity profile, then the most recently updated hosts.
       const serverStore = useServerStore();
+      const compiled = useSettingsStore().compiledRulesV2;
       const selfHost = serverStore.info && serverStore.info.hostname;
       hosts = _.orderBy(
         hosts,
         [
           host => (host && host === selfHost ? 1 : 0),
-          host => {
-            const hasWindow = this.bucketsWindow(host).length > 0;
-            const hasAfk = this.bucketsAFK(host).length > 0;
-            return hasWindow && hasAfk ? 2 : hasWindow || hasAfk ? 1 : 0;
-          },
+          host =>
+            hostCanResolveProfile({
+              host,
+              buckets: state.buckets,
+              compiled,
+              filterAfk: true,
+            })
+              ? 1
+              : 0,
           host => _.max(_.map(this.bucketsByHostname[host], b => b.last_updated)) || '',
         ],
         ['desc', 'desc', 'desc']
@@ -63,7 +64,7 @@ export const useBucketsStore = defineStore('buckets', {
       return _.uniq(_.map(this.buckets, bucket => bucket.device_id || bucket.data.device_id));
     },
 
-    available(): (hostname: string) => {
+    available(state: State): (hostname: string) => {
       window: boolean;
       browser: boolean;
       editor: boolean;
@@ -71,14 +72,14 @@ export const useBucketsStore = defineStore('buckets', {
       category: boolean;
       stopwatch: boolean;
     } {
-      // Returns a map of which kinds of buckets are available
-      //
-      // 'window' requires ((currentwindow + afkstatus) or android) buckets
-      // 'browser' requires (currentwindow + afk + browser) buckets
-      // 'editor' requires editor buckets
       return hostname => {
-        const windowAvail =
-          this.bucketsWindow(hostname).length > 0 && this.bucketsAFK(hostname).length > 0;
+        const compiled = useSettingsStore().compiledRulesV2;
+        const windowAvail = hostCanResolveProfile({
+          host: hostname,
+          buckets: state.buckets,
+          compiled,
+          filterAfk: true,
+        });
         const androidAvail = this.bucketsAndroid(hostname).length > 0;
 
         return {
@@ -86,7 +87,7 @@ export const useBucketsStore = defineStore('buckets', {
           browser: windowAvail && this.bucketsBrowser(hostname).length > 0,
           editor: this.bucketsEditor(hostname).length > 0,
           android: androidAvail,
-          category: windowAvail || androidAvail,
+          category: hostHasResolvedActivity(hostname, state.buckets, compiled) || androidAvail,
           stopwatch: this.bucketsStopwatch(hostname).length > 0,
         };
       };

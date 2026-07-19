@@ -63,6 +63,7 @@ import 'vue-awesome/icons/trash';
 import moment from 'moment';
 import _ from 'lodash';
 import { useCategoryStore } from '~/stores/categories';
+import { queryStringToArray } from '~/queries';
 import { useSettingsStore } from '~/stores/settings';
 import {
   buildSavedQuery,
@@ -264,7 +265,7 @@ RETURN = sort_by_duration(merged_events);
       }
 
       // the aw-client expects an array of commands with whitespace cleaned up
-      query = query.split(';').map(s => s.trim() + ';');
+      query = queryStringToArray(query);
       const timeperiods = [moment(this.startdate).format() + '/' + moment(this.enddate).format()];
 
       try {

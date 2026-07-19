@@ -53,7 +53,16 @@
  *             (Flatpak app ID retained: 'one.ablaze.floorp')
  */
 
-import { browser_appname_regex } from '~/queries';
+import {
+  appQuery,
+  activeTimeQuery,
+  browser_appname_regex,
+  canonicalEvents,
+  canonicalMultideviceEvents,
+  queryStringToArray,
+  RULE_ENGINE_CAPABILITIES,
+  serializeQueryJson,
+} from '~/queries';
 
 // Convert ActivityWatch (?i) patterns to JS RegExp with i flag for testing.
 // AW server uses Python-style (?i) inline flag; JS uses RegExp 'i' flag instead.
@@ -229,5 +238,723 @@ describe('browser_appname_regex', () => {
     for (const name of knownNames) {
       expect(re.test(name)).toBe(true);
     }
+  });
+});
+
+describe('flexible canonical queries', () => {
+  const baseParams = {
+    bid_window: 'aw-watcher-window_test',
+    bid_afk: 'aw-watcher-afk_test',
+    filter_afk: true,
+    categories: [],
+    filter_categories: [],
+  };
+
+  test('enriches context before v2 categorization when capabilities are present', () => {
+    const query = canonicalEvents({
+      ...baseParams,
+      capabilities: [RULE_ENGINE_CAPABILITIES.categorize, RULE_ENGINE_CAPABILITIES.sourceNamespace],
+      context_sources: [
+        {
+          source_id: 'vdesktop',
+          bucket_ids: ['aw-watcher-vdesktop_test'],
+          scope: 'global',
+          fields: ['vdesktop'],
+        },
+      ],
+      category_specs: [
+        {
+          id: 'personal',
+          name: ['Personal'],
+          rule: {
+            type: 'regex',
+            source: 'vdesktop',
+            field: 'vdesktop',
+            regex: 'Personal',
+          },
+        },
+      ],
+    });
+
+    expect(query).toContain('query_bucket_optional("aw-watcher-vdesktop_test")');
+    expect(query).toContain('"source_id":"vdesktop"');
+    expect(query).toContain('context_fields_0 = ["vdesktop"];');
+    expect(query).toContain(
+      'events = merge_subwatcher_fields(events, context_0, context_fields_0, context_options_0);'
+    );
+    expect(query).not.toContain('merge_subwatcher_fields(events, context_0, ["vdesktop"], {');
+    expect(query.indexOf('merge_subwatcher_fields')).toBeLessThan(query.indexOf('categorize_v2'));
+  });
+
+  test('selects only context buckets belonging to the queried host', () => {
+    const query = canonicalEvents({
+      ...baseParams,
+      hostname: 'laptop',
+      capabilities: [RULE_ENGINE_CAPABILITIES.categorize, RULE_ENGINE_CAPABILITIES.sourceNamespace],
+      context_sources: [
+        {
+          source_id: 'browser',
+          bucket_ids: ['browser_laptop', 'browser_desktop'],
+          scope: 'host',
+          bucket_hosts: {
+            browser_laptop: 'laptop',
+            browser_desktop: 'desktop',
+          },
+          fields: ['url'],
+        },
+      ],
+      category_specs: [],
+    });
+
+    expect(query).toContain('query_bucket_optional("browser_laptop")');
+    expect(query).not.toContain('query_bucket_optional("browser_desktop")');
+  });
+
+  test('keeps legacy categorization as the default', () => {
+    const query = canonicalEvents({
+      ...baseParams,
+      categories: [[['Work'], { type: 'regex', regex: 'devenv' }]],
+    });
+
+    expect(query).toContain('events = categorize(events');
+    expect(query).not.toContain('categorize_v2');
+  });
+
+  test('treats an explicitly empty v2 category set as uncategorized', () => {
+    const query = canonicalEvents({
+      ...baseParams,
+      categories: [[['Legacy'], { type: 'regex', regex: 'legacy' }]],
+      category_specs: [],
+      capabilities: [RULE_ENGINE_CAPABILITIES.categorize],
+    });
+
+    expect(query).toContain('events = categorize_v2(events, []);');
+    expect(query).not.toContain('events = categorize(events');
+  });
+
+  test('applies v2 categorization to Android app queries', () => {
+    const androidQuery = appQuery('aw-watcher-android_test', [], [], {
+      category_specs: [{ id: 'work', name: ['Work'], rule: { type: 'none' } }],
+      capabilities: [RULE_ENGINE_CAPABILITIES.categorize],
+    }).join('\n');
+
+    expect(androidQuery).toContain('events = categorize_v2(events');
+    expect(androidQuery.slice(0, androidQuery.indexOf('events = categorize_v2'))).not.toContain(
+      'merge_events_by_keys'
+    );
+  });
+
+  test('keeps the released-server legacy window query free of v2 functions', () => {
+    const query = canonicalEvents(baseParams);
+
+    expect(query).toContain('events = legacy_activity;');
+    expect(query).not.toContain('merge_subwatcher_fields');
+    expect(query).not.toContain('legacy_activity_period');
+  });
+
+  test('projects configured built-in window fields', () => {
+    const query = canonicalEvents({
+      ...baseParams,
+      capabilities: [RULE_ENGINE_CAPABILITIES.sourceNamespace],
+      legacy_window_fields: ['title', 'url'],
+    });
+
+    expect(query).toContain(
+      'events = merge_subwatcher_fields(events, legacy_activity, ["title","url"]);'
+    );
+  });
+
+  test('serializes backslashes in bucket IDs and rejects unrepresentable trailing ones', () => {
+    const query = canonicalEvents({
+      ...baseParams,
+      bid_window: String.raw`window\bucket`,
+      filter_afk: false,
+    });
+
+    expect(query).toContain(String.raw`query_bucket("window\bucket")`);
+    expect(() =>
+      canonicalEvents({
+        ...baseParams,
+        bid_window: 'window\\',
+        filter_afk: false,
+      })
+    ).toThrow('cannot end with an odd number of backslashes');
+  });
+
+  test('serializes quoted source bucket IDs exactly once', () => {
+    const query = canonicalEvents({
+      ...baseParams,
+      capabilities: [RULE_ENGINE_CAPABILITIES.sourceNamespace],
+      activity_coverage_sources: [
+        {
+          source_id: 'presence',
+          bucket_ids: ['presence-"quoted'],
+          scope: 'global',
+          fields: ['state'],
+        },
+      ],
+    });
+
+    expect(query).toContain(String.raw`query_bucket_optional("presence-\"quoted")`);
+    expect(query).not.toContain(String.raw`presence-\\\"quoted`);
+  });
+
+  test('does not load implicit window activity for explicit advanced sources', () => {
+    const query = canonicalEvents({
+      ...baseParams,
+      legacy_window_mode: 'none',
+      capabilities: [RULE_ENGINE_CAPABILITIES.categorize, RULE_ENGINE_CAPABILITIES.sourceNamespace],
+      category_specs: [],
+      activity_coverage_sources: [
+        {
+          source_id: 'presence',
+          bucket_ids: ['presence'],
+          scope: 'global',
+          fields: ['state'],
+        },
+      ],
+    });
+
+    expect(query).not.toContain('legacy_activity');
+    expect(query).not.toContain('aw-watcher-window_test');
+    expect(query).toContain('query_bucket_optional("presence")');
+  });
+
+  test('uses the diagnostic categorizer for previews', () => {
+    const query = canonicalEvents({
+      ...baseParams,
+      category_specs: [{ id: 'work', name: ['Work'], rule: { type: 'none' } }],
+      explain_categories: true,
+      capabilities: [
+        RULE_ENGINE_CAPABILITIES.categorize,
+        RULE_ENGINE_CAPABILITIES.explainCategorize,
+      ],
+    });
+
+    expect(query).toContain('events = categorize_v2_explain(events');
+  });
+
+  test('keeps semicolons inside query string literals', () => {
+    expect(queryStringToArray('rule = {"regex": "foo;bar"}; RETURN = rule;')).toEqual([
+      'rule = {"regex": "foo;bar"};',
+      'RETURN = rule;',
+    ]);
+  });
+
+  test('serializes valid regexes ending in a literal backslash', () => {
+    const query = canonicalEvents({
+      ...baseParams,
+      category_specs: [
+        {
+          id: 'path',
+          name: ['Path'],
+          rule: { type: 'regex', regex: String.raw`path\\` },
+        },
+      ],
+      capabilities: [RULE_ENGINE_CAPABILITIES.categorize],
+    });
+
+    expect(query).toContain(String.raw`"regex":"path\\"`);
+    expect(query).toContain('events = categorize_v2(events,');
+  });
+
+  test('serializes regexes containing an escaped quote without corrupting the query string', () => {
+    expect(serializeQueryJson({ regex: String.raw`a\"b` })).toBe(
+      String.raw`{"regex":"a\\\"b"}`
+    );
+  });
+
+  test('serializes custom field mappings without doubling raw backslashes', () => {
+    expect(serializeQueryJson({ 'path\\name': 'source\\field' })).toBe(
+      String.raw`{"path\name":"source\field"}`
+    );
+  });
+
+  test('rejects unrepresentable strings anywhere in structured query values', () => {
+    expect(() => serializeQueryJson({ category: ['invalid\\'] })).toThrow(
+      'cannot end with an odd number of backslashes'
+    );
+  });
+
+  test('rejects advanced queries when the server lacks capabilities', () => {
+    expect(() =>
+      canonicalEvents({
+        ...baseParams,
+        category_specs: [{ name: ['Work'], rule: { type: 'none' } }],
+      })
+    ).toThrow(RULE_ENGINE_CAPABILITIES.categorize);
+  });
+
+  test('compiles active-time expressions as overlap masks', () => {
+    const query = canonicalEvents({
+      ...baseParams,
+      hostname: 'workstation',
+      capabilities: [RULE_ENGINE_CAPABILITIES.activePeriods],
+      active_time_sources: [
+        {
+          source_id: 'window',
+          bucket_ids: ['aw-watcher-window_test'],
+          scope: 'host',
+          host: 'workstation',
+        },
+        {
+          source_id: 'afk',
+          bucket_ids: ['aw-watcher-afk_test'],
+          scope: 'host',
+          host: 'workstation',
+        },
+      ],
+      active_time_rule: {
+        type: 'all',
+        rules: [
+          { type: 'regex', source: 'window', field: 'app', regex: 'Teams' },
+          {
+            type: 'regex',
+            source: 'afk',
+            host: 'workstation',
+            field: 'status',
+            regex: 'not-afk',
+          },
+        ],
+      },
+    });
+
+    expect(query).toContain('not_afk = active_periods_v2(');
+    expect(query).toContain('["window", active_source_0]');
+    expect(query).toContain('active_time_rule, "workstation")');
+    expect(query).not.toContain('not_afk = filter_keyvals(not_afk');
+    expect(query.indexOf('active_periods_v2')).toBeLessThan(
+      query.indexOf('filter_period_intersect(events, not_afk)')
+    );
+  });
+
+  test('maps and applies replacement activity sources by priority order', () => {
+    const query = canonicalEvents({
+      ...baseParams,
+      capabilities: [RULE_ENGINE_CAPABILITIES.mapEventFields],
+      activity_sources: [
+        {
+          source_id: 'low',
+          bucket_ids: ['meeting-low-primary', 'meeting-low-secondary'],
+          scope: 'global',
+          field_mappings: {},
+        },
+        {
+          source_id: 'high',
+          bucket_ids: ['meeting-high'],
+          scope: 'global',
+          field_mappings: { title: 'subject' },
+        },
+      ],
+    });
+
+    expect(query).toContain('map_event_fields(activity_source_1, {"title":"subject"})');
+    expect(query).toContain(
+      'activity_source_0 = union_no_overlap(activity_source_0, activity_bucket_0_0)'
+    );
+    expect(query).toContain(
+      'activity_source_0 = union_no_overlap(activity_source_0, activity_bucket_0_1)'
+    );
+    expect(query.indexOf('events = union_no_overlap(activity_source_0, events)')).toBeLessThan(
+      query.indexOf('events = union_no_overlap(activity_source_1, events)')
+    );
+  });
+
+  test('passes the current host and suppresses sources bound to another host', () => {
+    const query = canonicalEvents({
+      ...baseParams,
+      hostname: 'workstation',
+      capabilities: [RULE_ENGINE_CAPABILITIES.categorize, RULE_ENGINE_CAPABILITIES.sourceNamespace],
+      category_specs: [
+        {
+          name: ['Workstation'],
+          rule: { type: 'regex', host: 'workstation', regex: 'editor' },
+        },
+      ],
+      context_sources: [
+        {
+          source_id: 'other',
+          bucket_ids: ['context-other'],
+          scope: 'host',
+          fields: ['project'],
+          host: 'laptop',
+        },
+      ],
+    });
+
+    expect(query).toContain('categorize_v2(events,');
+    expect(query).toContain(', "workstation");');
+    expect(query).not.toContain('context-other');
+  });
+
+  test('builds a generic activity stream without window or AFK buckets', () => {
+    const query = canonicalEvents({
+      hostname: 'desktop',
+      filter_afk: false,
+      categories: [],
+      filter_categories: [],
+      capabilities: [
+        RULE_ENGINE_CAPABILITIES.mapEventFields,
+        RULE_ENGINE_CAPABILITIES.categorize,
+        RULE_ENGINE_CAPABILITIES.sourceNamespace,
+      ],
+      activity_coverage_sources: [
+        {
+          source_id: 'meeting',
+          bucket_ids: ['meeting_desktop'],
+          scope: 'host',
+          host: 'desktop',
+          fields: ['subject'],
+        },
+        {
+          source_id: 'vdesktop',
+          bucket_ids: ['vdesktop_desktop'],
+          scope: 'host',
+          host: 'desktop',
+          fields: ['desktop'],
+        },
+      ],
+      category_specs: [
+        {
+          id: 'work',
+          name: ['Work'],
+          rule: {
+            type: 'regex',
+            source: 'vdesktop',
+            field: 'desktop',
+            regex: '^Work$',
+          },
+        },
+      ],
+    });
+
+    expect(query).toContain('events = [];');
+    expect(query).toContain('query_bucket_optional("meeting_desktop")');
+    expect(query).not.toContain('aw-watcher-window');
+    expect(query).not.toContain('aw-watcher-afk');
+    expect(query).toContain(
+      'events = period_union(events, activity_coverage_period_0)'
+    );
+    expect(query).toContain(
+      'events = period_union(events, activity_coverage_period_1)'
+    );
+    expect(query).toContain('"source_id":"meeting"');
+    expect(query).toContain('"source_id":"vdesktop"');
+    expect(query).not.toContain('events = union_no_overlap(activity_coverage_source_');
+    expect(query.indexOf('activity_coverage_options_1')).toBeLessThan(
+      query.indexOf('categorize_v2')
+    );
+  });
+
+  test('rejects duplicate abstract activity source ids', () => {
+    expect(() =>
+      canonicalEvents({
+        hostname: 'desktop',
+        filter_afk: false,
+        categories: [],
+        filter_categories: [],
+        capabilities: [RULE_ENGINE_CAPABILITIES.sourceNamespace],
+        activity_coverage_sources: [
+          {
+            source_id: 'presence',
+            bucket_ids: ['meeting_desktop'],
+            scope: 'host',
+            host: 'desktop',
+            fields: ['subject'],
+          },
+          {
+            source_id: 'presence',
+            bucket_ids: ['desktop_desktop'],
+            scope: 'host',
+            host: 'desktop',
+            fields: ['vdesktop'],
+          },
+        ],
+      })
+    ).toThrow('Duplicate activity coverage source id: presence');
+  });
+
+  test('fills active gaps from background sources without replacing activity', () => {
+    const query = canonicalEvents({
+      ...baseParams,
+      hostname: 'desktop',
+      capabilities: [
+        RULE_ENGINE_CAPABILITIES.mapEventFields,
+        RULE_ENGINE_CAPABILITIES.activePeriods,
+      ],
+      active_time_sources: [
+        {
+          source_id: 'presence',
+          bucket_ids: ['presence_desktop'],
+          scope: 'host',
+          host: 'desktop',
+        },
+      ],
+      active_time_rule: {
+        type: 'regex',
+        source: 'presence',
+        field: 'status',
+        regex: 'active',
+      },
+      background_sources: [
+        {
+          source_id: 'desktop',
+          bucket_ids: ['vdesktop_desktop'],
+          scope: 'host',
+          host: 'desktop',
+          field_mappings: { title: 'vdesktop' },
+        },
+      ],
+    });
+
+    expect(query).toContain(
+      'background_source_0 = filter_period_intersect(background_source_0, not_afk)'
+    );
+    expect(query).toContain('map_event_fields(background_source_0, {"title":"vdesktop"})');
+    expect(query).toContain('events = union_no_overlap(events, background_source_0)');
+    expect(query.indexOf('filter_period_intersect(events, not_afk)')).toBeLessThan(
+      query.indexOf('events = union_no_overlap(events, background_source_0)')
+    );
+  });
+
+  test('requires active-time input for background activity', () => {
+    expect(() =>
+      canonicalEvents({
+        hostname: 'desktop',
+        filter_afk: false,
+        categories: [],
+        filter_categories: [],
+        capabilities: [RULE_ENGINE_CAPABILITIES.mapEventFields],
+        background_sources: [
+          {
+            source_id: 'desktop',
+            bucket_ids: ['vdesktop_desktop'],
+            scope: 'global',
+            field_mappings: {},
+          },
+        ],
+      })
+    ).toThrow('Background activity sources require an active-time rule or AFK source');
+  });
+
+  test('preserves legacy stopwatch activity outside the active-time mask', () => {
+    const query = canonicalEvents({
+      ...baseParams,
+      bid_stopwatch: 'stopwatch',
+      filter_afk: true,
+    });
+
+    expect(query).not.toContain('stopwatch_period');
+    expect(query.indexOf('events = union_no_overlap(stopwatch_events, events)')).toBeGreaterThan(
+      query.indexOf('events = filter_period_intersect(events, not_afk)')
+    );
+  });
+
+  test('masks stopwatch coverage with active time on capable servers', () => {
+    const query = canonicalEvents({
+      ...baseParams,
+      bid_stopwatch: 'stopwatch',
+      filter_afk: true,
+      capabilities: [RULE_ENGINE_CAPABILITIES.sourceNamespace],
+    });
+
+    expect(query).toContain('stopwatch_period');
+    expect(query.indexOf('events = period_union(events, stopwatch_period)')).toBeLessThan(
+      query.indexOf('events = filter_period_intersect(events, not_afk)')
+    );
+    expect(query).not.toContain('events = union_no_overlap(stopwatch_events, events)');
+  });
+
+  test('combines all host foreground activity before background gap fillers', () => {
+    const query = canonicalMultideviceEvents({
+      hosts: ['laptop', 'desktop'],
+      host_params: {
+        laptop: {
+          bid_window: 'window_laptop',
+          bid_afk: 'afk_laptop',
+        },
+        desktop: {
+          bid_window: 'window_desktop',
+          bid_afk: 'afk_desktop',
+        },
+      },
+      filter_afk: false,
+      always_active_pattern: '',
+      categories: [],
+      filter_categories: [['Work']],
+      capabilities: [RULE_ENGINE_CAPABILITIES.mapEventFields],
+      background_sources: [
+        {
+          source_id: 'calendar',
+          bucket_ids: ['calendar_global'],
+          scope: 'global',
+          field_mappings: {},
+        },
+      ],
+    });
+
+    const lastForegroundMerge = query.indexOf('events = union_no_overlap(events, events_host_1)');
+    const firstBackgroundMerge = query.indexOf(
+      'events = union_no_overlap(events, events_background_host_0)'
+    );
+    expect(lastForegroundMerge).toBeGreaterThan(-1);
+    expect(firstBackgroundMerge).toBeGreaterThan(lastForegroundMerge);
+    expect(query.lastIndexOf('filter_keyvals(events, "$category"')).toBeGreaterThan(
+      firstBackgroundMerge
+    );
+  });
+
+  test('does not rebuild coverage during the multidevice background-only pass', () => {
+    const query = canonicalMultideviceEvents({
+      hosts: ['laptop', 'desktop'],
+      host_params: {},
+      filter_afk: false,
+      always_active_pattern: '',
+      categories: [],
+      filter_categories: [],
+      capabilities: [
+        RULE_ENGINE_CAPABILITIES.sourceNamespace,
+        RULE_ENGINE_CAPABILITIES.mapEventFields,
+      ],
+      activity_coverage_sources: [
+        {
+          source_id: 'presence',
+          bucket_ids: ['presence_global'],
+          scope: 'global',
+          fields: ['state'],
+        },
+      ],
+      background_sources: [
+        {
+          source_id: 'legacy-background',
+          bucket_ids: ['background_global'],
+          scope: 'global',
+          field_mappings: {},
+        },
+      ],
+    });
+
+    expect(query.match(/query_bucket_optional\("presence_global"\)/g)).toHaveLength(2);
+  });
+
+  test('uses conventional per-host watcher buckets when no override is supplied', () => {
+    const query = canonicalMultideviceEvents({
+      hosts: ['laptop'],
+      host_params: {},
+      filter_afk: true,
+      always_active_pattern: '',
+      categories: [],
+      filter_categories: [],
+    });
+
+    expect(query).toContain('query_bucket("aw-watcher-window_laptop")');
+    expect(query).toContain('query_bucket("aw-watcher-afk_laptop")');
+  });
+
+  test('does not inherit a selected host stopwatch bucket into another host', () => {
+    const query = canonicalMultideviceEvents({
+      hosts: ['laptop', 'desktop'],
+      bid_stopwatch: 'stopwatch_laptop',
+      host_params: {
+        laptop: { bid_window: 'window_laptop', bid_stopwatch: 'stopwatch_laptop' },
+        desktop: { bid_window: 'window_desktop', bid_stopwatch: undefined },
+      },
+      filter_afk: false,
+      always_active_pattern: '',
+      categories: [],
+      filter_categories: [],
+    });
+
+    expect(query.match(/query_bucket\("stopwatch_laptop"\)/g)).toHaveLength(1);
+  });
+
+  test('builds active-time-only queries without activity sources', () => {
+    const query = activeTimeQuery({
+      hostname: 'desktop',
+      capabilities: [RULE_ENGINE_CAPABILITIES.activePeriods],
+      active_time_sources: [
+        {
+          source_id: 'presence',
+          bucket_ids: ['presence_desktop'],
+          scope: 'host',
+          host: 'desktop',
+        },
+      ],
+      active_time_rule: {
+        type: 'regex',
+        source: 'presence',
+        field: 'present',
+        regex: 'true',
+      },
+    });
+
+    expect(query).toContain('active_periods_v2');
+    expect(query).toContain('RETURN = not_afk;');
+    expect(query).not.toContain('events =');
+    expect(query).not.toContain('categorize');
+  });
+
+  test('does not infer global scope from missing ownership', () => {
+    expect(() =>
+      canonicalEvents({
+        ...baseParams,
+        hostname: 'desktop',
+        capabilities: [RULE_ENGINE_CAPABILITIES.sourceNamespace],
+        context_sources: [
+          {
+            source_id: 'browser',
+            bucket_ids: ['browser_laptop'],
+            fields: ['url'],
+          },
+        ],
+      })
+    ).toThrow('Source scope must be explicit');
+  });
+
+  test('allows explicitly global sources for every host', () => {
+    for (const hostname of ['laptop', 'desktop']) {
+      const query = canonicalEvents({
+        ...baseParams,
+        hostname,
+        capabilities: [RULE_ENGINE_CAPABILITIES.sourceNamespace],
+        context_sources: [
+          {
+            source_id: 'calendar',
+            bucket_ids: ['calendar_global'],
+            scope: 'global',
+            fields: ['meeting'],
+          },
+        ],
+      });
+      expect(query).toContain('query_bucket_optional("calendar_global")');
+    }
+  });
+
+  test('asks capable servers to enforce host-scoped source ownership', () => {
+    const query = canonicalEvents({
+      ...baseParams,
+      hostname: 'laptop',
+      capabilities: [
+        RULE_ENGINE_CAPABILITIES.sourceNamespace,
+        RULE_ENGINE_CAPABILITIES.expectedBucketHostname,
+      ],
+      context_sources: [
+        {
+          source_id: 'editor',
+          bucket_ids: ['editor_laptop'],
+          host: 'laptop',
+          fields: ['project'],
+        },
+        {
+          source_id: 'calendar',
+          bucket_ids: ['calendar_global'],
+          scope: 'global',
+          fields: ['meeting'],
+        },
+      ],
+    });
+
+    expect(query).toContain('query_bucket_optional("editor_laptop", "laptop")');
+    expect(query).toContain('query_bucket_optional("calendar_global")');
   });
 });

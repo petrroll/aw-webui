@@ -168,3 +168,24 @@ export function getCategoryColorFromEvent(bucket: IBucket, e: IEvent) {
 
   return getColorFromString(getTitleAttr(bucket, e));
 }
+
+export function getRawColorFromEvent(bucket: IBucket, e: IEvent) {
+  return getColorFromString(getTitleAttr(bucket, e));
+}
+
+export function getTimelineItemStyle(backgroundColor: string, afk: boolean): string {
+  const borderColor = Color(backgroundColor).darken(0.3);
+  if (!afk) {
+    return `background-color: ${backgroundColor}; border-color: ${borderColor}`;
+  }
+
+  const mutedColor = Color(backgroundColor).desaturate(0.35).lighten(0.1);
+  const hatch =
+    'repeating-linear-gradient(135deg,' +
+    'rgba(255,255,255,0.6) 0,rgba(255,255,255,0.6) 5px,' +
+    'rgba(0,0,0,0.32) 5px,rgba(0,0,0,0.32) 11px)';
+  return (
+    `background-color: ${mutedColor}; background-image: ${hatch}; ` +
+    `border-color: ${borderColor}; border-style: dashed; opacity: 0.5`
+  );
+}

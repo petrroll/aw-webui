@@ -12,6 +12,7 @@ interface HourlyData {
 
 interface Dataset {
   label: string;
+  category?: string;
   backgroundColor: string;
   data: number[];
 }
@@ -40,6 +41,7 @@ export function buildBarchartDataset(data_by_hour: HourlyData[], classes: Catego
           });
           return {
             label: c.name.join(' > '),
+            category: c.name.join(' > '),
             backgroundColor: getColorFromCategory(c, classes),
             data: values,
           } as Dataset;

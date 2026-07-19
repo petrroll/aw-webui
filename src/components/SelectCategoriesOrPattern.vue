@@ -54,7 +54,6 @@ export default Vue.extend({
             }
             return false;
           })
-          .filter(cat => cat.rule.type === 'regex')
           .map(cat => [cat.name, cat.rule]);
       } else if (this.mode === 'custom') {
         return [[['searched'], { type: 'regex', regex: this.pattern }]];

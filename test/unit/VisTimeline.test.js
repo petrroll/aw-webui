@@ -62,6 +62,105 @@ describe('VisTimeline zoom-anchor regression (#847)', () => {
     });
   });
 
+  describe('final category row', () => {
+    test('uses the canonical category label and color without adding swimlanes', () => {
+      const event = {
+        timestamp: '2026-07-18T12:00:00Z',
+        duration: 60,
+        data: {
+          $category: ['Work', 'Programming'],
+          $category_score: 5,
+          $color: '#123456',
+        },
+      };
+
+      const chartData = VisTimeline.computed.chartData.call({
+        bucketsFromEither: [
+          {
+            id: 'Final category',
+            type: 'category-result',
+            events: [event],
+          },
+        ],
+        filterShortEvents: false,
+        swimlane: 'category',
+      });
+
+      expect(chartData).toHaveLength(1);
+      expect(chartData[0]).toMatchObject({
+        bucketId: 'Final category',
+        title: 'Programming',
+        color: '#123456',
+        swimlane: '',
+        inactive: false,
+        event,
+      });
+      expect(chartData[0].tooltip).toContain('Work > Programming');
+      expect(chartData[0].tooltip).not.toContain('<th>Score</th>');
+    });
+
+    test('marks AFK category slices for striped rendering', () => {
+      const chartData = VisTimeline.computed.chartData.call({
+        bucketsFromEither: [
+          {
+            id: 'category-result:desktop',
+            type: 'category-result',
+            events: [
+              {
+                timestamp: '2026-07-18T12:00:00Z',
+                duration: 60,
+                data: {
+                  $category: ['Personal'],
+                  $color: '#abcdef',
+                  $inactive: true,
+                },
+              },
+            ],
+          },
+        ],
+        filterShortEvents: false,
+        swimlane: null,
+      });
+
+      expect(chartData[0].inactive).toBe(true);
+      expect(chartData[0].tooltip).toContain('Inactive (not counted)');
+    });
+
+    test('uses raw app colors for ordinary buckets and AFK status colors for AFK buckets', () => {
+      const chartData = VisTimeline.computed.chartData.call({
+        bucketsFromEither: [
+          {
+            id: 'window',
+            type: 'currentwindow',
+            events: [
+              {
+                timestamp: '2026-07-18T12:00:00Z',
+                duration: 60,
+                data: { app: 'google-chrome', title: 'Matches a simple category rule' },
+              },
+            ],
+          },
+          {
+            id: 'afk',
+            type: 'afkstatus',
+            events: [
+              {
+                timestamp: '2026-07-18T12:00:00Z',
+                duration: 60,
+                data: { status: 'not-afk' },
+              },
+            ],
+          },
+        ],
+        filterShortEvents: false,
+        swimlane: null,
+      });
+
+      expect(chartData[0].color).toBe('#6AA7FE');
+      expect(chartData[1].color).toBe('#7F6');
+    });
+  });
+
   describe('onHorizontalWheel', () => {
     const { onHorizontalWheel } = VisTimeline.methods;
 

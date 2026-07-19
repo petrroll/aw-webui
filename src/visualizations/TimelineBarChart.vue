@@ -118,7 +118,9 @@ export default {
                   hours += 1;
                 }
                 const minutes_str = minutes.toString().padStart(2, '0');
-                return `${hours}:${minutes_str}`;
+                const duration = `${hours}:${minutes_str}`;
+                const category = (context.dataset as { category?: string }).category;
+                return category ? [`Category: ${category}`, duration] : duration;
               },
             },
           },

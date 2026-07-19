@@ -20,12 +20,47 @@ div#visualization {
   }
 
   .vis-tooltip {
-    // Position tooltip above the cursor instead of overlapping the timeline bars
     transform: translateY(-100%);
     margin-top: -15px;
-    // Ensure tooltip is readable
-    max-width: 400px;
+    box-sizing: border-box;
+    width: max-content;
+    max-width: min(400px, calc(100vw - 1.5rem));
+    padding: 0.55rem 0.7rem;
     pointer-events: none;
+    color: #212529;
+    background: #fff;
+    border: 1px solid rgba(0, 0, 0, 0.18);
+    border-radius: 0.35rem;
+    box-shadow: 0 0.35rem 0.9rem rgba(0, 0, 0, 0.18);
+    font-size: 0.875rem;
+    line-height: 1.35;
+    white-space: normal;
+
+    table {
+      width: 100%;
+      max-width: 100%;
+      table-layout: fixed;
+      border-collapse: collapse;
+    }
+
+    th,
+    td {
+      padding: 0.1rem 0;
+      vertical-align: top;
+    }
+
+    th {
+      width: 5.5rem;
+      padding-right: 0.75rem;
+      text-align: left;
+      white-space: nowrap;
+    }
+
+    td {
+      min-width: 0;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
   }
 
   .vis-labelset .vis-label .vis-inner {
@@ -36,32 +71,20 @@ div#visualization {
     overflow-wrap: anywhere;
     line-height: 1.2;
   }
-
-  .timeline-timeline {
-    font-family: sans-serif !important;
-
-    .timeline-panel {
-      box-sizing: border-box;
-    }
-
-    .timeline-item {
-      border-radius: 2px;
-    }
-  }
 }
 </style>
 
 <script lang="ts">
 import _ from 'lodash';
 import moment from 'moment';
-import Color from 'color';
 import { buildTooltip } from '../util/tooltip.js';
-import { getCategoryColorFromEvent, getTitleAttr } from '../util/color';
+import { getRawColorFromEvent, getTimelineItemStyle, getTitleAttr } from '../util/color';
 import { getSwimlane } from '../util/swimlane.js';
 import { IEvent } from '../util/interfaces';
 import { formatTimelineBucketLabelHtml, shortenBucketLabel } from '../util/timelineLabels';
 
 import { Timeline } from 'vis-timeline/esnext';
+import type { TimelineItem } from 'vis-timeline/esnext';
 import 'vis-timeline/styles/vis-timeline-graph2d.css';
 import EventEditor from '~/components/EventEditor.vue';
 
@@ -78,7 +101,9 @@ interface IChartDataItem {
   color: string;
   event: IEvent;
   swimlane: string;
+  inactive: boolean;
 }
+
 export default {
   components: {
     EventEditor,
@@ -102,11 +127,6 @@ export default {
         zoomMin: 1000 * 60, // 10min in milliseconds
         zoomMax: 1000 * 60 * 60 * 24 * 31 * 3, // about three months in milliseconds
         stack: false,
-        tooltip: {
-          followMouse: true,
-          overflowMethod: 'flip',
-          delay: 0,
-        },
         // Keep vertical wheel input as zoom-only. Without preferZoom, vis-timeline
         // zooms around the cursor and then pans the same wheel event when
         // horizontalScroll is enabled, which makes the zoom anchor drift.
@@ -152,17 +172,20 @@ export default {
           events = _.filter(events, e => e.duration > 1);
           console.log(`Filtered ${bucket.events.length - events.length} events`);
         }
-        events.sort((a, b) => a.timestamp.valueOf() - b.timestamp.valueOf());
+        events = [...events].sort((a, b) => a.timestamp.valueOf() - b.timestamp.valueOf());
         _.each(events, e => {
+          const categoryResult = bucket.type === 'category-result';
+          const category = e.data['$category'] || ['Uncategorized'];
           data.push({
             bucketId: bucket.id,
-            title: getTitleAttr(bucket, e),
+            title: categoryResult ? _.last(category) : getTitleAttr(bucket, e),
             tooltip: buildTooltip(bucket, e),
             start: new Date(e.timestamp),
             end: new Date(moment(e.timestamp).add(e.duration, 'seconds').valueOf()),
-            color: getCategoryColorFromEvent(bucket, e),
+            color: categoryResult ? e.data['$color'] || '#CCC' : getRawColorFromEvent(bucket, e),
             event: e,
-            swimlane: getSwimlane(bucket, e.color, this.swimlane, e),
+            swimlane: categoryResult ? '' : getSwimlane(bucket, e.color, this.swimlane, e),
+            inactive: categoryResult && e.data['$inactive'] === true,
           });
         });
       });
@@ -341,7 +364,8 @@ export default {
       const labelCounts: Record<string, number> = {};
       _.each(buckets, b => {
         if (b && b.id && realHost(b)) {
-          const short = shortenBucketLabel(b.id) || b.id;
+          const short =
+            b.type === 'category-result' ? b.data?.label || b.id : shortenBucketLabel(b.id) || b.id;
           labelCounts[short] = (labelCounts[short] || 0) + 1;
         }
       });
@@ -361,27 +385,33 @@ export default {
         }
         let label = '';
         if (this.showRowLabels) {
-          const host = realHost(bucket);
-          label = formatTimelineBucketLabelHtml(bucket.id, {
-            hostname: hasCollision && host ? host : undefined,
-          });
+          if (bucket.type === 'category-result') {
+            const host = realHost(bucket);
+            label = formatTimelineBucketLabelHtml(bucket.data?.label || bucket.id, {
+              hostname: hasCollision && host ? host : undefined,
+            });
+          } else {
+            const host = realHost(bucket);
+            label = formatTimelineBucketLabelHtml(bucket.id, {
+              hostname: hasCollision && host ? host : undefined,
+            });
+          }
         }
         return { id: bucket.id, content: label };
       });
 
       // Build items
-      const items = _.map(this.chartData, (item, i) => {
-        const bgColor = item.color;
-        const borderColor = Color(bgColor).darken(0.3);
+      const items: TimelineItem[] = _.map(this.chartData, (item, i) => {
         return {
           id: String(i),
           group: item.bucketId,
           content: item.title,
           title: item.tooltip,
-          start: moment(item.start),
-          end: moment(item.end),
-          style: `background-color: ${bgColor}; border-color: ${borderColor}`,
+          start: item.start,
+          end: item.end,
+          style: getTimelineItemStyle(item.color, item.inactive),
           subgroup: item.swimlane,
+          className: item.inactive ? 'timeline-item--inactive' : '',
         };
       });
 
@@ -401,10 +431,11 @@ export default {
               }
             ),
             content: 'query',
-            start: this.queriedInterval[0],
-            end: this.queriedInterval[1],
+            start: this.queriedInterval[0].toDate(),
+            end: this.queriedInterval[1].toDate(),
             style: 'background-color: #aaa; height: 10px',
             subgroup: ``,
+            className: '',
           });
         }
 

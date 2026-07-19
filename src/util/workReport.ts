@@ -1,4 +1,7 @@
 import { IBucket } from '~/util/interfaces';
+import { canonicalMultideviceEvents, type MultiQueryParams, queryStringToArray } from '~/queries';
+import type { CompiledProfileQueryOptions } from '~/util/rulesV2';
+import { hostCanResolveProfile, hostHasResolvedActivity } from '~/util/activityProfile';
 
 export interface WorkReportHostOption {
   value: string;
@@ -6,43 +9,48 @@ export interface WorkReportHostOption {
   disabled: boolean;
 }
 
-function getWindowHosts(buckets: IBucket[]): string[] {
+function getProfileHosts(buckets: IBucket[], compiled?: CompiledProfileQueryOptions): string[] {
   const hosts = buckets
-    .filter(bucket => bucket.type === 'currentwindow')
-    .map(bucket => bucket.id.replace('aw-watcher-window_', ''));
-  return [...new Set(hosts)];
+    .map(bucket => bucket.hostname || bucket.data?.hostname)
+    .filter((host): host is string => !!host && host !== 'unknown');
+  return [...new Set(hosts)].filter(host => hostHasResolvedActivity(host, buckets, compiled));
 }
 
-function getAFKHosts(buckets: IBucket[]): Set<string> {
-  return new Set(
-    buckets
-      .filter(bucket => bucket.type === 'afkstatus')
-      .map(bucket => bucket.id.replace('aw-watcher-afk_', ''))
-  );
-}
-
-export function getWorkReportHostOptions(buckets: IBucket[]): WorkReportHostOption[] {
-  const afkHosts = getAFKHosts(buckets);
-  return getWindowHosts(buckets).map(host => {
-    const hasAFK = afkHosts.has(host);
+export function getWorkReportHostOptions(
+  buckets: IBucket[],
+  compiled?: CompiledProfileQueryOptions
+): WorkReportHostOption[] {
+  return getProfileHosts(buckets, compiled).map(host => {
+    const supported = hostCanResolveProfile({
+      host,
+      buckets,
+      compiled,
+      filterAfk: true,
+    });
     return {
       value: host,
-      text: hasAFK ? host : `${host} (requires aw-watcher-afk)`,
-      disabled: !hasAFK,
+      text: supported ? host : `${host} (requires an active-time source)`,
+      disabled: !supported,
     };
   });
 }
 
 export function getUnsupportedWorkReportHosts(
   selectedHosts: string[],
-  buckets: IBucket[]
+  buckets: IBucket[],
+  compiled?: CompiledProfileQueryOptions
 ): string[] {
-  const afkHosts = getAFKHosts(buckets);
-  return selectedHosts.filter(host => !afkHosts.has(host));
+  return selectedHosts.filter(
+    host => !hostCanResolveProfile({ host, buckets, compiled, filterAfk: true })
+  );
 }
 
-export function getSupportedWorkReportHosts(selectedHosts: string[], buckets: IBucket[]): string[] {
-  const unsupportedHosts = new Set(getUnsupportedWorkReportHosts(selectedHosts, buckets));
+export function getSupportedWorkReportHosts(
+  selectedHosts: string[],
+  buckets: IBucket[],
+  compiled?: CompiledProfileQueryOptions
+): string[] {
+  const unsupportedHosts = new Set(getUnsupportedWorkReportHosts(selectedHosts, buckets, compiled));
   return selectedHosts.filter(host => !unsupportedHosts.has(host));
 }
 
@@ -50,37 +58,17 @@ export function getSupportedWorkReportHosts(selectedHosts: string[], buckets: IB
 // component so the generated query can be snapshot-tested — that's how we
 // catch arg-count regressions like flood(events, breakTime) which aw-query
 // rejects with "Tried to call function flood with invalid amount of arguments".
-export function buildWorkReportQuery(
-  hosts: string[],
-  categoriesStr: string,
-  categoriesFilter: any[]
-): string {
-  let query = '';
-  for (let hi = 0; hi < hosts.length; hi++) {
-    const hostname = hosts[hi];
-    query += `
-            events_${hi} = flood(query_bucket("aw-watcher-window_${hostname}"));
-            not_afk_${hi} = flood(query_bucket("aw-watcher-afk_${hostname}"));
-            not_afk_${hi} = filter_keyvals(not_afk_${hi}, "status", ["not-afk"]);
-            events_${hi} = filter_period_intersect(events_${hi}, not_afk_${hi});
-            events_${hi} = categorize(events_${hi}, ${categoriesStr});
-            events_${hi} = filter_keyvals(events_${hi}, "$category", ${JSON.stringify(
-      categoriesFilter
-    )});
-          `;
-  }
-  query += '\nevents = [];';
-  for (let hi = 0; hi < hosts.length; hi++) {
-    query += `\nevents = union_no_overlap(events, events_${hi});`;
-  }
-  query += `
+export function buildWorkReportQuery(params: MultiQueryParams, categoriesFilter: any[]): string {
+  const query = `
+          ${canonicalMultideviceEvents({ ...params, filter_categories: categoriesFilter })}
           duration = sum_durations(events);
           RETURN = {"events": events, "duration": duration};
         `;
   // Strip per-line trailing whitespace so the snapshot test stays stable
   // under the trailing-whitespace pre-commit hook. aw-query is whitespace-
   // tolerant so this has no runtime effect.
-  return query
+  return queryStringToArray(query)
+    .join('\n')
     .split('\n')
     .map(line => line.replace(/\s+$/, ''))
     .join('\n');

@@ -53,4 +53,14 @@ describe('SunburstCategories', () => {
 
     wrapper.destroy();
   });
+
+  test('shows the full category path in hover information', () => {
+    expect(
+      SunburstCategories.methods.categoryPath({
+        name: 'Code',
+        parent: ['Work'],
+      })
+    ).toBe('Work > Code');
+    expect(SunburstCategories.methods.categoryPath({ name: 'All' })).toBe('All categories');
+  });
 });

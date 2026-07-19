@@ -14,8 +14,8 @@ div
     | {{error}}
 
   b-alert(v-if="hostnames.length === 0" show variant="info")
-    | No host with both window and AFK buckets is available, so alerts can't run yet.
-    | Install #[a(href="https://docs.activitywatch.net/en/latest/watchers.html") aw-watcher-window and aw-watcher-afk] to enable this view.
+    | {{ $t('settings.categorization.noResolvedActivityHost') }}
+    span.ml-1 {{ $t('settings.categorization.activitySetupHelp') }}
 
   b-card(v-for="alert in alerts", :key="alert.name")
     b-button.float-right(@click="deleteAlert(alert.name)" size="sm" variant="outline-danger")
@@ -60,7 +60,8 @@ div
 <script lang="ts">
 import _ from 'lodash';
 import moment from 'moment';
-import { canonicalEvents } from '~/queries';
+import { queryStringToArray, resolveActivityProfile } from '~/queries';
+import { hostCanResolveProfile } from '~/util/activityProfile';
 
 import 'vue-awesome/icons/plus';
 import 'vue-awesome/icons/check';
@@ -69,6 +70,7 @@ import 'vue-awesome/icons/trash';
 
 import { useBucketsStore } from '~/stores/buckets';
 import { useCategoryStore } from '~/stores/categories';
+import { useSettingsStore } from '~/stores/settings';
 
 export default {
   name: 'Alerts',
@@ -121,12 +123,14 @@ export default {
   mounted: async function () {
     await this.bucketsStore.ensureLoaded();
     await this.categoryStore.load();
-    // Filter to hosts that actually have the buckets we query against.
-    // Prevents "There's no bucket named 'aw-watcher-afk_<host>'" when the
-    // hosts list contains a stale hostname with only one orphan bucket.
-    this.hostnames = this.bucketsStore.hosts.filter(
-      h =>
-        this.bucketsStore.bucketsWindow(h).length > 0 && this.bucketsStore.bucketsAFK(h).length > 0
+    const advanced = useSettingsStore().compiledRulesV2;
+    this.hostnames = this.bucketsStore.hosts.filter(host =>
+      hostCanResolveProfile({
+        host,
+        buckets: this.bucketsStore.buckets,
+        compiled: advanced,
+        filterAfk: this.filter_afk,
+      })
     );
     this.hostname = this.hostnames[0];
   },
@@ -154,16 +158,18 @@ export default {
 
     // Check current time of alert goals
     check: async function () {
-      let query = canonicalEvents({
-        bid_window: 'aw-watcher-window_' + this.hostname,
-        bid_afk: 'aw-watcher-afk_' + this.hostname,
+      let query = resolveActivityProfile({
+        hostname: this.hostname,
+        bid_window: this.bucketsStore.bucketsWindow(this.hostname)[0],
+        bid_afk: this.bucketsStore.bucketsAFK(this.hostname)[0],
         filter_afk: this.filter_afk,
         categories: useCategoryStore().classes_for_query,
         filter_categories: null, // classes.map(c => c[0]),
+        ...useSettingsStore().compiledRulesV2,
       });
       query += '; RETURN = events;';
 
-      const query_array = query.split(';').map(s => s.trim() + ';');
+      const query_array = queryStringToArray(query);
 
       // Get start of today
       const start = moment().subtract(1, 'days').startOf('day');

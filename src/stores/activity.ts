@@ -5,7 +5,7 @@ import { map, filter, values, groupBy, sortBy, flow, reverse } from 'lodash/fp';
 import { IEvent } from '~/util/interfaces';
 
 import { window_events } from '~/util/fakedata';
-import queries from '~/queries';
+import queries, { queryStringToArray, resolveActivityProfile } from '~/queries';
 import { get_day_start_with_offset } from '~/util/time';
 import {
   TimePeriod,
@@ -20,6 +20,12 @@ import {
 import { useSettingsStore } from '~/stores/settings';
 import { useBucketsStore } from '~/stores/buckets';
 import { useCategoryStore } from '~/stores/categories';
+import {
+  hostHasResolvedActivity,
+  hostHasResolvedActiveTime,
+  queryNeedsResolvedActiveTime,
+} from '~/util/activityProfile';
+export { queryNeedsResolvedActiveTime } from '~/util/activityProfile';
 
 import { getClient } from '~/util/awclient';
 
@@ -257,15 +263,7 @@ export const useActivityStore = defineStore('activity', {
             settingsStore.useMultidevice ? 'Querying multiple devices' : 'Querying a single device'
           );
           if (settingsStore.useMultidevice) {
-            const hostnames = bucketsStore.hosts.filter(
-              // require that the host has window buckets,
-              // and that the host is not a fakedata host,
-              // unless we're explicitly querying fakedata
-              host =>
-                host &&
-                bucketsStore.bucketsWindow(host).length > 0 &&
-                (!host.startsWith('fakedata') || query_options.host.startsWith('fakedata'))
-            );
+            const hostnames = this.eligibleMultideviceHosts(query_options);
             console.info('Including hosts in multiquery: ', hostnames);
             await this.query_multidevice_full(query_options, hostnames);
           } else {
@@ -275,7 +273,7 @@ export const useActivityStore = defineStore('activity', {
           await this.query_android(query_options);
         } else {
           console.log(
-            'Cannot query windows as we are missing either an afk/window bucket pair or an android bucket'
+            'Cannot query activity because no eligible activity source and active-time source were resolved'
           );
           this.query_window_completed();
           this.query_category_time_by_period_completed();
@@ -286,7 +284,9 @@ export const useActivityStore = defineStore('activity', {
         } else if (this.android.available) {
           await this.query_active_history_android(query_options);
         } else {
-          console.log('Cannot call query_active_history as we do not have an afk bucket');
+          console.log(
+            'Cannot call query_active_history because no active-time source is available'
+          );
           await this.query_active_history_completed();
         }
 
@@ -308,13 +308,22 @@ export const useActivityStore = defineStore('activity', {
       }
     },
 
-    async query_android({ timeperiod, filter_categories }: QueryOptions) {
+    async query_android({ timeperiod, filter_categories, host }: QueryOptions) {
       const periods = [timeperiodToStr(timeperiod)];
       const categoryStore = useCategoryStore();
+      const advanced = useSettingsStore().compiledRulesV2;
       const q = queries.appQuery(
         this.buckets.android[0],
         categoryStore.classes_for_query,
-        filter_categories
+        filter_categories,
+        advanced
+          ? {
+              hostname: host,
+              category_specs: advanced.category_specs,
+              context_sources: advanced.context_sources,
+              capabilities: advanced.capabilities,
+            }
+          : undefined
       );
       const data = await getClient().query(periods, q).catch(this.errorHandler);
       this.query_window_completed(data[0]);
@@ -329,22 +338,65 @@ export const useActivityStore = defineStore('activity', {
     },
 
     async query_multidevice_full(
-      { timeperiod, filter_categories, filter_afk, always_active_pattern }: QueryOptions,
+      {
+        timeperiod,
+        filter_categories,
+        filter_afk,
+        include_audible,
+        always_active_pattern,
+      }: QueryOptions,
       hosts: string[]
     ) {
       const periods = [timeperiodToStr(timeperiod)];
       const categories = useCategoryStore().classes_for_query;
+      const host_params = this.multideviceHostParams(hosts, true);
 
       const q = queries.multideviceQuery({
         hosts,
         filter_afk,
         categories,
         filter_categories,
-        host_params: {},
+        host_params,
+        include_audible,
         always_active_pattern,
+        ...useSettingsStore().compiledRulesV2,
       });
       const data = await getClient().query(periods, q, { name: 'multidevice', verbose: true });
       this.query_window_completed(data[0].window);
+    },
+
+    eligibleMultideviceHosts(queryOptions: QueryOptions): string[] {
+      const bucketsStore = useBucketsStore();
+      const settingsStore = useSettingsStore();
+      const needsActiveTime = queryNeedsResolvedActiveTime(
+        queryOptions.filter_afk,
+        (settingsStore.compiledRulesV2?.background_sources.length ?? 0) > 0
+      );
+      return bucketsStore.hosts.filter(
+        host =>
+          host &&
+          hostHasResolvedActivity(host, bucketsStore.buckets, settingsStore.compiledRulesV2) &&
+          (!needsActiveTime ||
+            hostHasResolvedActiveTime(host, bucketsStore.buckets, settingsStore.compiledRulesV2)) &&
+          (!host.startsWith('fakedata') || queryOptions.host.startsWith('fakedata'))
+      );
+    },
+
+    multideviceHostParams(hosts: string[], includeStopwatch: boolean) {
+      const bucketsStore = useBucketsStore();
+      return Object.fromEntries(
+        hosts.map(host => [
+          host,
+          {
+            bid_window: bucketsStore.bucketsWindow(host)[0],
+            bid_afk: bucketsStore.bucketsAFK(host)[0],
+            bid_browsers: bucketsStore.bucketsByType(host, 'web.tab.current'),
+            bid_stopwatch: includeStopwatch
+              ? bucketsStore.bucketsByType(host, 'general.stopwatch')[0]
+              : undefined,
+          },
+        ])
+      );
     },
 
     async query_desktop_full({
@@ -354,11 +406,13 @@ export const useActivityStore = defineStore('activity', {
       include_audible,
       include_stopwatch,
       always_active_pattern,
+      host,
     }: QueryOptions) {
       const periods = [timeperiodToStr(timeperiod)];
       const categories = useCategoryStore().classes_for_query;
 
       const q = queries.fullDesktopQuery({
+        hostname: host,
         bid_window: this.buckets.window[0],
         bid_afk: this.buckets.afk[0],
         bid_browsers: this.buckets.browser,
@@ -371,6 +425,7 @@ export const useActivityStore = defineStore('activity', {
         filter_categories,
         include_audible,
         always_active_pattern,
+        ...useSettingsStore().compiledRulesV2,
       });
       const data = await getClient().query(periods, q, {
         name: 'fullDesktopQuery',
@@ -393,7 +448,7 @@ export const useActivityStore = defineStore('activity', {
       this.query_editor_completed(data[0]);
     },
 
-    async query_active_history({ timeperiod, ...query_options }: QueryOptions) {
+    async query_active_history({ timeperiod, host }: QueryOptions) {
       const settingsStore = useSettingsStore();
       const bucketsStore = useBucketsStore();
       // Filter out periods that are already in the history, and that are in the future
@@ -402,32 +457,73 @@ export const useActivityStore = defineStore('activity', {
           !_.includes(this.active.history, tp_str) && new Date(tp_str.split('/')[0]) < new Date()
         );
       });
-      let afk_buckets: string[] = [];
+      let activeHosts: string[] = [];
+      const advanced = settingsStore.compiledRulesV2;
       if (settingsStore.useMultidevice) {
-        // get all hostnames that qualify for the multidevice query
-        const hostnames = bucketsStore.hosts.filter(
-          // require that the host has afk buckets,
-          // and that the host is not a fakedata host,
-          // unless we're explicitly querying fakedata
-          host =>
-            host &&
-            bucketsStore.bucketsAFK(host).length > 0 &&
-            (!host.startsWith('fakedata') || query_options.host.startsWith('fakedata'))
+        activeHosts = bucketsStore.hosts.filter(
+          candidateHost =>
+            candidateHost &&
+            candidateHost !== 'unknown' &&
+            hostHasResolvedActiveTime(
+              candidateHost,
+              bucketsStore.buckets,
+              settingsStore.compiledRulesV2
+            ) &&
+            hostHasResolvedActivity(
+              candidateHost,
+              bucketsStore.buckets,
+              settingsStore.compiledRulesV2
+            ) &&
+            (!candidateHost.startsWith('fakedata') || host.startsWith('fakedata'))
         );
-        // get all afk buckets for all hosts
-        afk_buckets = _.flatten(hostnames.map(bucketsStore.bucketsAFK));
       } else {
-        afk_buckets = [this.buckets.afk[0]];
+        activeHosts =
+          hostHasResolvedActiveTime(host, bucketsStore.buckets, advanced) &&
+          hostHasResolvedActivity(host, bucketsStore.buckets, advanced)
+            ? [host]
+            : [];
       }
-      const query = queries.activityQuery(afk_buckets);
+      const profile = settingsStore.rulesV2.activity_profiles_v2[0];
+      const {
+        category_specs: _categorySpecs,
+        context_sources: _contextSources,
+        ...activityOptions
+      } = advanced ?? {};
+      const hostQueries = activeHosts.map((activeHost, index) => {
+        const suffix = `active_host_${index}`;
+        return (
+          resolveActivityProfile({
+            hostname: activeHost,
+            bid_window: bucketsStore.bucketsWindow(activeHost)[0],
+            bid_afk: bucketsStore.bucketsAFK(activeHost)[0],
+            bid_browsers: bucketsStore.bucketsBrowser(activeHost),
+            filter_afk: false,
+            include_audible:
+              profile?.active_time.type === 'legacy'
+                ? profile.active_time.include_audible
+                : undefined,
+            always_active_pattern: settingsStore.always_active_pattern || undefined,
+            categories: [],
+            filter_categories: null,
+            return_variable_suffix: suffix,
+            ...activityOptions,
+          }) + `\nactive_${suffix} = filter_period_intersect(events_${suffix}, not_afk_${suffix});`
+        );
+      });
+      const union = activeHosts
+        .map(
+          (_activeHost, index) =>
+            `active_events = union_no_overlap(active_events, active_active_host_${index});`
+        )
+        .join('\n');
+      const query = queryStringToArray(
+        `${hostQueries.join('\n')}\nactive_events = [];\n${union}\nRETURN = active_events;`
+      );
       const data = await getClient().query(periods, query, {
         name: 'activityQuery',
         verbose: true,
       });
-      const active_history = _.zipObject(
-        periods,
-        _.map(data, pair => _.filter(pair, e => e.data.status == 'not-afk'))
-      );
+      const active_history = _.zipObject(periods, data);
       this.query_active_history_completed({ active_history });
     },
 
@@ -435,9 +531,11 @@ export const useActivityStore = defineStore('activity', {
       timeperiod,
       filter_categories,
       filter_afk,
+      include_audible,
       include_stopwatch,
       dontQueryInactive,
       always_active_pattern,
+      host,
     }: QueryOptions & { dontQueryInactive: boolean }) {
       // TODO: Needs to be adapted for Android
       let periods: string[];
@@ -498,6 +596,16 @@ export const useActivityStore = defineStore('activity', {
 
         const isAndroid = this.buckets.android[0] !== undefined;
         const categories = useCategoryStore().classes_for_query;
+        const settingsStore = useSettingsStore();
+        const advanced = settingsStore.compiledRulesV2;
+        const multideviceHosts =
+          settingsStore.useMultidevice && !isAndroid
+            ? this.eligibleMultideviceHosts({
+                timeperiod,
+                filter_afk,
+                host,
+              })
+            : [];
         // TODO: Clean up call, pass QueryParams in fullDesktopQuery as well
         // TODO: Unify QueryOptions and QueryParams
         const query = queries.categoryQuery({
@@ -509,14 +617,34 @@ export const useActivityStore = defineStore('activity', {
           categories,
           filter_categories,
           filter_afk,
+          include_audible,
           always_active_pattern,
-          ...(isAndroid
+          ...(multideviceHosts.length > 0
             ? {
+                hosts: multideviceHosts,
+                host_params: this.multideviceHostParams(
+                  multideviceHosts,
+                  include_stopwatch ?? false
+                ),
+                ...advanced,
+              }
+            : isAndroid
+            ? {
+                hostname: host,
                 bid_android: this.buckets.android[0],
+                ...(advanced
+                  ? {
+                      category_specs: advanced.category_specs,
+                      context_sources: advanced.context_sources,
+                      capabilities: advanced.capabilities,
+                    }
+                  : {}),
               }
             : {
+                hostname: host,
                 bid_afk: this.buckets.afk[0],
                 bid_window: this.buckets.window[0],
+                ...advanced,
               }),
         });
         const result = await getClient().query([period], query, {
@@ -553,16 +681,29 @@ export const useActivityStore = defineStore('activity', {
     },
 
     set_available(this: State) {
-      // TODO: Move to bucketStore on a per-host basis?
-      this.window.available = this.buckets.afk.length > 0 && this.buckets.window.length > 0;
-      this.browser.available =
-        this.buckets.afk.length > 0 &&
-        this.buckets.window.length > 0 &&
-        this.buckets.browser.length > 0;
-      this.active.available = this.buckets.afk.length > 0;
+      const currentHost = this.query_options?.host ?? '';
+      const bucketsStore = useBucketsStore();
+      const compiled = useSettingsStore().compiledRulesV2;
+      const activityAvailable = hostHasResolvedActivity(
+        currentHost,
+        bucketsStore.buckets,
+        compiled
+      );
+      const activeTimeAvailable = hostHasResolvedActiveTime(
+        currentHost,
+        bucketsStore.buckets,
+        compiled
+      );
+      const needsActiveTime = queryNeedsResolvedActiveTime(
+        this.query_options?.filter_afk,
+        (compiled?.background_sources.length ?? 0) > 0
+      );
+      this.window.available = activityAvailable && (!needsActiveTime || activeTimeAvailable);
+      this.browser.available = this.window.available && this.buckets.browser.length > 0;
+      this.active.available = activeTimeAvailable;
       this.editor.available = this.buckets.editor.length > 0;
       this.android.available = this.buckets.android.length > 0;
-      this.category.available = this.window.available || this.android.available;
+      this.category.available = activityAvailable || this.android.available;
       this.stopwatch.available = this.buckets.stopwatch.length > 0;
     },
 

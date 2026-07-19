@@ -1,7 +1,10 @@
 // Jest Snapshot v1, https://goo.gl/fbAQLP
 
 exports[`generate fullDesktopQuery 1`] = `
-"events = flood(query_bucket("aw-watcher-window_testhost"));
+"events = [];
+legacy_activity = flood(query_bucket("aw-watcher-window_testhost"));
+events = legacy_activity;
+stopwatch_events = [];
 not_afk = flood(query_bucket("aw-watcher-afk_testhost"));
 not_afk = filter_keyvals(not_afk, "status", ["not-afk"]);
 not_treat_as_afk = filter_keyvals_regex(events, "app", "meow|nyaan|specials: \\w(\\\\)");
@@ -12,7 +15,6 @@ browser_events = [];
 audible_events = filter_keyvals(browser_events, "audible", [true]);
 not_afk = period_union(not_afk, audible_events);
 events = filter_period_intersect(events, not_afk);
-stopwatch_events = [];
 events = categorize(events, []);
 events = filter_keyvals(events, "$category", true);
 title_events = sort_by_duration(merge_events_by_keys(events, ["app", "title"]));

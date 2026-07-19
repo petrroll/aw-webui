@@ -4,6 +4,10 @@ div#wrapper(v-if="loaded")
 
   div(:class="{'container': !fullContainer, 'container-fluid': fullContainer}").px-0.px-md-2
     div.aw-container.my-sm-3.p-3
+      b-alert(v-if="advancedRulesUnsupported" show variant="warning")
+        | {{ $t('settings.categorization.advancedRulesNotApplied') }}
+        router-link.ml-1(to="/settings")
+          | {{ $t('settings.categorization.openRulesSettings') }}
       error-boundary
         user-satisfaction-poll
         new-release-notification(v-if="isNewReleaseCheckEnabled")
@@ -33,12 +37,20 @@ export default {
     fullContainer() {
       return this.$route.meta.fullContainer;
     },
+    advancedRulesUnsupported() {
+      if (this.$route.path.startsWith('/settings')) return false;
+      const serverStore = useServerStore();
+      if (!serverStore.info) return false;
+      const settingsStore = useSettingsStore();
+      return settingsStore.hasAdvancedRulesV2 && !settingsStore.compiledRulesV2;
+    },
   },
 
   async beforeCreate() {
     // Get Theme From LocalStorage
     const settingsStore = useSettingsStore();
-    await settingsStore.ensureLoaded();
+    const serverStore = useServerStore();
+    await Promise.all([settingsStore.ensureLoaded(), serverStore.getInfo()]);
     const theme = settingsStore.theme;
     const detectedTheme = theme === 'auto' ? detectPreferredTheme() : theme;
 
@@ -63,11 +75,6 @@ export default {
       }
     }
     this.loaded = true;
-  },
-
-  mounted: async function () {
-    const serverStore = useServerStore();
-    await serverStore.getInfo();
   },
 };
 </script>

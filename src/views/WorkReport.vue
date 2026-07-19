@@ -54,6 +54,8 @@ div
     b-button.ml-2(@click="exportJSON" variant="outline-secondary" :disabled="!hasData")
       icon(name="download")
       |  Export JSON
+  b-alert(v-if="loadError" show variant="danger") {{ loadError }}
+  b-alert(v-if="loadWarning" show variant="warning") {{ loadWarning }}
 
   div(v-if="loading")
     b-spinner.mr-2
@@ -109,19 +111,27 @@ interface DailyData {
   events: any[];
 }
 
-// Sum of gaps between adjacent events that are <= breakTimeSeconds.
-function bridgeGaps(events: any[], breakTimeSeconds: number): number {
-  if (!events || events.length < 2 || breakTimeSeconds <= 0) return 0;
+function summarizeSessions(
+  events: any[],
+  breakTimeSeconds: number
+): { bridgedDuration: number; sessions: number } {
+  if (!events || events.length === 0) return { bridgedDuration: 0, sessions: 0 };
   const sorted = [...events].sort(
     (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
   );
-  let extra = 0;
+  let bridgedDuration = 0;
+  let sessions = 1;
+  let previousEnd =
+    new Date(sorted[0].timestamp).getTime() + Math.max(0, sorted[0].duration) * 1000;
   for (let i = 1; i < sorted.length; i++) {
-    const prevEnd = new Date(sorted[i - 1].timestamp).getTime() + sorted[i - 1].duration * 1000;
-    const gap = (new Date(sorted[i].timestamp).getTime() - prevEnd) / 1000;
-    if (gap > 0 && gap <= breakTimeSeconds) extra += gap;
+    const start = new Date(sorted[i].timestamp).getTime();
+    const end = start + Math.max(0, sorted[i].duration) * 1000;
+    const gap = (start - previousEnd) / 1000;
+    if (gap > breakTimeSeconds) sessions += 1;
+    else if (gap > 0) bridgedDuration += gap;
+    previousEnd = Math.max(previousEnd, end);
   }
-  return extra;
+  return { bridgedDuration, sessions };
 }
 
 export default {
@@ -138,13 +148,18 @@ export default {
       dateRange: 'last7d',
 
       loading: false,
+      loadError: '',
+      loadWarning: '',
       dailyData: [] as DailyData[],
       rawData: {} as Record<string, any>,
     };
   },
   computed: {
     hostOptions() {
-      return getWorkReportHostOptions(this.bucketsStore.buckets || []);
+      return getWorkReportHostOptions(
+        this.bucketsStore.buckets || [],
+        this.settingsStore.compiledRulesV2
+      );
     },
 
     categoryOptions() {
@@ -201,51 +216,55 @@ export default {
   methods: {
     async loadData() {
       this.loading = true;
+      this.loadError = '';
+      this.loadWarning = '';
       try {
         const client = getClient();
 
         if (this.selectedHosts.length === 0) {
-          alert('Please select at least one host');
+          this.loadError = String(this.$t('workReport.selectHost'));
           this.loading = false;
           return;
         }
 
         if (this.selectedCategories.length === 0) {
-          alert('Please select at least one category');
+          this.loadError = String(this.$t('workReport.selectCategory'));
           this.loading = false;
           return;
         }
 
         const unsupportedHosts = getUnsupportedWorkReportHosts(
           this.selectedHosts,
-          this.bucketsStore.buckets || []
+          this.bucketsStore.buckets || [],
+          this.settingsStore.compiledRulesV2
         );
         if (unsupportedHosts.length > 0) {
           const supportedHosts = getSupportedWorkReportHosts(
             this.selectedHosts,
-            this.bucketsStore.buckets || []
+            this.bucketsStore.buckets || [],
+            this.settingsStore.compiledRulesV2
           );
           if (supportedHosts.length === 0) {
-            alert(
-              `The selected hosts are missing aw-watcher-afk buckets and can't be included in Work Report: ${unsupportedHosts.join(
-                ', '
-              )}`
+            this.loadError = String(
+              this.$t('workReport.unsupportedHosts', { hosts: unsupportedHosts.join(', ') })
             );
             this.loading = false;
             return;
           }
 
-          alert(
-            `Skipping hosts without aw-watcher-afk buckets: ${unsupportedHosts.join(
-              ', '
-            )}. Work Report will use: ${supportedHosts.join(', ')}`
+          this.loadWarning = String(
+            this.$t('workReport.skippedHosts', {
+              skipped: unsupportedHosts.join(', '),
+              used: supportedHosts.join(', '),
+            })
           );
           this.selectedHosts = supportedHosts;
         }
 
         const hostsToQuery = getSupportedWorkReportHosts(
           this.selectedHosts,
-          this.bucketsStore.buckets || []
+          this.bucketsStore.buckets || [],
+          this.settingsStore.compiledRulesV2
         );
         const timeperiods = this.getTimeperiods();
         const breakTimeSeconds = this.breakTime * 60;
@@ -280,9 +299,30 @@ export default {
         const categoriesFilter = expanded;
 
         const categories = this.categoryStore.classes_for_query;
-        const categoriesStr = JSON.stringify(categories).replace(/\\\\/g, '\\');
-
-        const query = buildWorkReportQuery(hostsToQuery, categoriesStr, categoriesFilter);
+        const activeTime = this.settingsStore.rulesV2.activity_profiles_v2[0]?.active_time;
+        const hostParams = Object.fromEntries(
+          hostsToQuery.map(host => [
+            host,
+            {
+              bid_window: this.bucketsStore.bucketsWindow(host)[0],
+              bid_afk: this.bucketsStore.bucketsAFK(host)[0],
+              bid_browsers: this.bucketsStore.bucketsBrowser(host),
+            },
+          ])
+        );
+        const query = buildWorkReportQuery(
+          {
+            hosts: hostsToQuery,
+            host_params: hostParams,
+            filter_afk: true,
+            categories,
+            filter_categories: categoriesFilter,
+            always_active_pattern: this.settingsStore.always_active_pattern,
+            include_audible: activeTime?.type === 'legacy' ? activeTime.include_audible : undefined,
+            ...this.settingsStore.compiledRulesV2,
+          },
+          categoriesFilter
+        );
 
         const results = await client.query(timeperiods, [query]);
 
@@ -293,15 +333,16 @@ export default {
           // Bridge sub-breakTime gaps between adjacent events so a quick
           // context-switch still counts as continuous work time. aw-query's
           // flood() only deduplicates overlap, so we add the bridging here.
-          const bridged = baseDuration + bridgeGaps(events, breakTimeSeconds);
+          const sessionSummary = summarizeSessions(events, breakTimeSeconds);
+          const bridged = baseDuration + sessionSummary.bridgedDuration;
 
           const startDate = tp.split('/')[0];
 
           return {
             date: moment(startDate).format('YYYY-MM-DD'),
             duration: bridged,
-            sessions: events.length,
-            avgSession: events.length > 0 ? bridged / events.length : 0,
+            sessions: sessionSummary.sessions,
+            avgSession: sessionSummary.sessions > 0 ? bridged / sessionSummary.sessions : 0,
             events,
           };
         });
@@ -309,7 +350,7 @@ export default {
         this.rawData = results;
       } catch (error) {
         console.error('Error loading work time data:', error);
-        alert('Error loading data. See console for details.');
+        this.loadError = String(this.$t('workReport.loadError'));
       } finally {
         this.loading = false;
       }

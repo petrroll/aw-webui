@@ -38,9 +38,7 @@ div
     span.text-muted Loading...
   div(v-else-if="!queryOptions.hostname")
     p.text-muted.mb-0
-      | No host with window/AFK buckets is available. Install
-      | #[a(href="https://docs.activitywatch.net/en/latest/watchers.html") a watcher]
-      | to start collecting data.
+      | {{ $t('settings.categorization.noWatcherDataHost') }}
   div(v-else)
     div(v-if="words_by_duration.length == 0")
       | No words with significant duration. You're good to go!
@@ -113,12 +111,14 @@ import { mapState } from 'pinia';
 
 import { useCategoryStore } from '~/stores/categories';
 import { useBucketsStore } from '~/stores/buckets';
+import { useSettingsStore } from '~/stores/settings';
 
-import { canonicalEvents } from '~/queries';
+import { resolveActivityProfile } from '~/queries';
 import { getClient } from '~/util/awclient';
 import CategoryEditModal from '~/components/CategoryEditModal.vue';
 import { isRegexBroad, validateRegex } from '~/util/validate';
 import { findCommonPhrases } from '~/util/categorization';
+import { get_inclusive_local_date_range } from '~/util/time';
 
 export default {
   name: 'CategoryBuilder',
@@ -230,21 +230,19 @@ export default {
       }
       await this.categoryStore.load();
       const awclient = getClient();
+      const bucketsStore = useBucketsStore();
       const query =
-        canonicalEvents({
-          bid_window: 'aw-watcher-window_' + this.queryOptions.hostname,
-          bid_afk: 'aw-watcher-afk_' + this.queryOptions.hostname,
+        resolveActivityProfile({
+          hostname: this.queryOptions.hostname,
+          bid_window: bucketsStore.bucketsWindow(this.queryOptions.hostname)[0],
+          bid_afk: bucketsStore.bucketsAFK(this.queryOptions.hostname)[0],
           filter_afk: this.queryOptions.filter_afk,
           categories: this.categoryStore.classes_for_query,
           filter_categories: [this.category],
+          ...useSettingsStore().compiledRulesV2,
         }) + 'RETURN = limit_events(sort_by_duration(events), 1000);';
       const data = await awclient.query(
-        [
-          {
-            start: new Date(this.queryOptions.start),
-            end: new Date(this.queryOptions.stop),
-          },
-        ],
+        [get_inclusive_local_date_range(this.queryOptions.start, this.queryOptions.stop)],
         query.split('\n')
       );
 

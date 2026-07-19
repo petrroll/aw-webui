@@ -13,8 +13,8 @@ sunburst(:data="data", :colorScale="colorfunc", :getCategoryForColor="categoryFo
     //nodeInfoDisplayer(:current="nodes.mouseOver" :root="nodes.root" description="time spent" :show-all-number="false")
     div.info
       div(v-if="nodes.mouseOver !== null && nodes.mouseOver")
-        div.parent {{ nodes.mouseOver.data.parent ? nodes.mouseOver.data.parent.join(" > ") : " " }}
-        div.name {{ nodes.mouseOver.data.name }}
+        div.category-label Category:
+        div.name {{ categoryPath(nodes.mouseOver.data) }}
         div {{ nodes.mouseOver.value | friendlyduration }}
         div ({{ Math.round(100 * nodes.mouseOver.value / nodes.root.value) }}%)
 
@@ -77,6 +77,10 @@ export default {
     },
   },
   methods: {
+    categoryPath: function (data) {
+      if (data.name === 'All' && !data.parent) return 'All categories';
+      return (data.parent ? data.parent.concat([data.name]) : [data.name]).join(' > ');
+    },
     categoryForColor: function (d) {
       const category = d.parent ? d.parent.concat([d.name]) : [d.name];
       return category.join(SEP);
@@ -113,7 +117,7 @@ export default {
     font-size: 1.5em;
   }
 
-  .parent {
+  .category-label {
     font-size: 0.8em;
   }
 }

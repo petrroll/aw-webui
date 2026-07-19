@@ -2,7 +2,9 @@ import { isEqual } from 'lodash';
 import { setActivePinia, createPinia } from 'pinia';
 
 import { useCategoryStore } from '~/stores/categories';
+import { useSettingsStore } from '~/stores/settings';
 import { createMissingParents, defaultCategories, Category } from '~/util/classes';
+import { defaultBuiltinWindowSource } from '~/util/rulesV2';
 
 describe('categories store', () => {
   setActivePinia(createPinia());
@@ -12,13 +14,13 @@ describe('categories store', () => {
     categoryStore.clearAll();
   });
 
-  test('loads default categories', () => {
+  test('loads default categories', async () => {
     // Load categories
     expect(categoryStore.classes).toHaveLength(0);
     categoryStore.restoreDefaultClasses();
 
     expect(categoryStore.classes_unsaved_changes).toBeTruthy();
-    categoryStore.save();
+    await categoryStore.save();
 
     expect(categoryStore.classes_unsaved_changes).toBeFalsy();
     expect(categoryStore.classes).not.toHaveLength(0);
@@ -82,6 +84,182 @@ describe('categories store', () => {
 
     // Check that defaultCategories haven't mutated
     expect(defaultCategories.map(c => c.name)).toContainEqual(['Media', 'Music']);
+  });
+
+  test('resolves canonical child paths after a pending parent rename', () => {
+    categoryStore.load([
+      { name: ['Parent'], rule: { type: 'none' } },
+      { name: ['Parent', 'Child'], rule: { type: 'none' } },
+    ]);
+    categoryStore.queueV2Edit({
+      categoryId: 'parent',
+      originalName: ['Parent'],
+      name: ['Renamed'],
+      rule: { type: 'none' },
+      priority: 0,
+      requires: [],
+    });
+
+    expect(categoryStore.canonicalNameForPendingPath(['Renamed', 'Child'])).toEqual([
+      'Parent',
+      'Child',
+    ]);
+  });
+
+  test('resolves chained pending parent and child renames', () => {
+    categoryStore.queueV2Edit({
+      categoryId: 'child',
+      originalName: ['Parent', 'Child'],
+      name: ['Parent', 'Renamed child'],
+      rule: { type: 'none' },
+      priority: 0,
+      requires: [],
+    });
+    categoryStore.queueV2Edit({
+      categoryId: 'parent',
+      originalName: ['Parent'],
+      name: ['Renamed parent'],
+      rule: { type: 'none' },
+      priority: 0,
+      requires: [],
+    });
+
+    expect(categoryStore.canonicalNameForPendingPath(['Renamed parent', 'Renamed child'])).toEqual([
+      'Parent',
+      'Child',
+    ]);
+  });
+
+  test('keeps a pending rename before deleting the renamed category', () => {
+    categoryStore.queueV2Edit({
+      categoryId: 'parent',
+      originalName: ['Parent'],
+      name: ['Renamed parent'],
+      rule: { type: 'none' },
+      priority: 0,
+      requires: [],
+    });
+
+    categoryStore.queueV2Delete(['Parent'], 'parent');
+
+    expect(categoryStore.pending_v2_edits).toHaveLength(2);
+    expect(categoryStore.pending_v2_edits[0]).toMatchObject({
+      categoryId: 'parent',
+      originalName: ['Parent'],
+      name: ['Renamed parent'],
+    });
+    expect(categoryStore.pending_v2_edits[1]).toMatchObject({
+      delete: true,
+      categoryId: 'parent',
+    });
+  });
+
+  test('tracks unsaved v2 editor drafts by section', () => {
+    categoryStore.setRulesV2DraftDirty('sources', true);
+    categoryStore.setRulesV2DraftDirty('active-time', true);
+    expect(categoryStore.rules_v2_unsaved_changes).toBe(true);
+
+    categoryStore.setRulesV2DraftDirty('sources', false);
+    expect(categoryStore.rules_v2_unsaved_changes).toBe(true);
+
+    categoryStore.setRulesV2DraftDirty('active-time', false);
+    expect(categoryStore.rules_v2_unsaved_changes).toBe(false);
+  });
+
+  test('keeps inline source definitions pending until categories are saved', () => {
+    const sources = [
+      {
+        id: 'bucket_browser',
+        label: 'Browser tabs',
+        bucket_ids: ['aw-watcher-web_test'],
+        fields: ['title', 'url'],
+        auto_generated: true,
+      },
+    ];
+
+    categoryStore.queueV2Sources(sources, []);
+
+    expect(categoryStore.pendingV2Sources).toEqual([defaultBuiltinWindowSource(), ...sources]);
+    expect(categoryStore.classes_unsaved_changes).toBe(true);
+  });
+
+  test('persists updates to existing inline source definitions', async () => {
+    const settingsStore = useSettingsStore();
+    settingsStore.$patch({
+      _loaded: true,
+      activity_profiles_v2: [
+        {
+          schema_version: 2,
+          id: 'default',
+          category_set_ids: ['default'],
+          sources: [
+            {
+              id: 'desktop',
+              label: 'Virtual desktop',
+              bucket_ids: ['desktop'],
+              scope: 'global',
+              fields: ['vdesktop'],
+              auto_generated: true,
+            },
+          ],
+          active_time: {
+            type: 'legacy',
+            use_afk: true,
+            include_audible: true,
+            always_active_pattern: '',
+          },
+        },
+      ],
+      category_sets_v2: [
+        {
+          schema_version: 2,
+          id: 'default',
+          categories: [
+            {
+              id: 'personal',
+              name: ['Personal'],
+              rule: { type: 'regex', source: 'desktop', regex: 'Personal' },
+            },
+          ],
+        },
+      ],
+    });
+    const saveMock = jest.spyOn(settingsStore, 'saveCanonicalRulesV2').mockResolvedValue();
+    const baselineSources = settingsStore.rulesV2.activity_profiles_v2[0].sources;
+    categoryStore.queueV2Sources([
+      {
+        id: 'desktop',
+        label: 'Virtual desktop',
+        bucket_ids: ['desktop'],
+        scope: 'global',
+        fields: ['vdesktop'],
+        activity_mode: 'fill-gaps' as const,
+        canonical_fields: { title: 'vdesktop' },
+      },
+    ], baselineSources);
+    settingsStore.activity_profiles_v2[0].sources.push({
+      id: 'browser',
+      label: 'Browser',
+      bucket_ids: ['browser'],
+      scope: 'global',
+      fields: ['url'],
+    });
+
+    await categoryStore.save();
+
+    expect(
+      saveMock.mock.calls[0][0].profiles[0].sources.find(source => source.id === 'desktop')
+    ).toMatchObject({
+      id: 'desktop',
+      activity_mode: 'fill-gaps',
+      canonical_fields: { title: 'vdesktop' },
+    });
+    expect(
+      saveMock.mock.calls[0][0].profiles[0].sources.find(source => source.id === 'browser')
+    ).toMatchObject({
+      id: 'browser',
+      label: 'Browser',
+    });
   });
 
   test('modify a category after deleting another', () => {

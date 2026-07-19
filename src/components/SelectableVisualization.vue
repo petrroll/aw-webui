@@ -78,7 +78,7 @@ div
     div(v-if="type == 'timeline_barchart'")
       aw-timeline-barchart(:datasets="datasets", :timeperiod_start="activityStore.query_options.timeperiod.start", :timeperiod_length="activityStore.query_options.timeperiod.length", style="height: 100")
     div(v-if="type == 'sunburst_clock'")
-      aw-sunburst-clock(:date="date", :afkBucketId="activityStore.buckets.afk[0]", :windowBucketId="activityStore.buckets.window[0]")
+      aw-sunburst-clock(:date="date", :host="activityStore.query_options.host")
     div(v-if="type == 'custom_vis'")
       aw-custom-vis(:visname="props.visname" :title="props.title")
     div(v-if="type == 'vis_timeline' && isSingleDay")
