@@ -1,6 +1,8 @@
 import type { CompiledProfileQueryOptions } from '~/util/rulesV2';
+import type { CompiledActivityQueryV2 } from '~/util/rulesV2';
 import type { IBucket } from '~/util/interfaces';
 import { resolveSourceBucketIds } from '~/queries';
+import { materializeActivityQueryV2 } from '~/util/materializeV2';
 
 interface ResolvedSource {
   bucket_ids: string[];
@@ -83,5 +85,57 @@ export function hostCanResolveProfile(input: {
     hostHasResolvedActivity(input.host, input.buckets, input.compiled) &&
     (!queryNeedsResolvedActiveTime(input.filterAfk, hasBackgroundSources) ||
       hostHasResolvedActiveTime(input.host, input.buckets, input.compiled))
+  );
+}
+
+// ---------------------------------------------------------------------------
+// v2 availability — inspects only the materialized coverage/active-time sources.
+// It never special-cases the currentwindow bucket type or a legacy window mode:
+// the configured default window source is materialized like any other source,
+// and a missing/unconfigured window bucket is simply inert.
+// ---------------------------------------------------------------------------
+
+export function hostHasResolvedActivityV2(
+  host: string,
+  buckets: IBucket[],
+  compiled?: CompiledActivityQueryV2,
+  options: {
+    includeStopwatch?: boolean;
+  } = {}
+): boolean {
+  if (!compiled) return false;
+  const materialized = materializeActivityQueryV2({
+    compiled,
+    buckets,
+    host,
+    includeStopwatch: options.includeStopwatch,
+  });
+  const bucketIds = availableBucketIds(buckets);
+  return (materialized.activity_coverage_sources ?? []).some(source =>
+    sourceAvailableForHost(source, host, bucketIds)
+  );
+}
+
+export function hostHasResolvedActiveTimeV2(
+  host: string,
+  buckets: IBucket[],
+  compiled?: CompiledActivityQueryV2,
+  options: {
+    includeAudible?: boolean;
+    browserBucketIds?: string[];
+  } = {}
+): boolean {
+  if (!compiled) return false;
+  const materialized = materializeActivityQueryV2({
+    compiled,
+    buckets,
+    host,
+    includeAudible: options.includeAudible,
+    browserBucketIds: options.browserBucketIds,
+  });
+  if (!materialized.active_time_rule) return false;
+  const bucketIds = availableBucketIds(buckets);
+  return (materialized.active_time_sources ?? []).some(source =>
+    sourceAvailableForHost(source, host, bucketIds)
   );
 }

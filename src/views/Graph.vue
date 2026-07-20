@@ -67,7 +67,7 @@ import 'vue-awesome/icons/spinner';
 import 'vue-awesome/icons/angle-double-down';
 import 'vue-awesome/icons/angle-double-up';
 
-import { queryStringToArray, resolveActivityProfile } from '~/queries';
+import { resolveActivityEventsQuery } from '~/util/activityQuery';
 
 import { useCategoryStore } from '~/stores/categories';
 import { useBucketsStore } from '~/stores/buckets';
@@ -111,20 +111,25 @@ export default {
     },
     fetchEvents: async function () {
       // TODO: use full query (one per day/timeperiod) instead of resolving each period separately
-      let query = resolveActivityProfile({
-        hostname: this.queryOptions.hostname,
-        bid_window: this.bucketsStore.bucketsWindow(this.queryOptions.hostname)[0],
-        bid_afk: this.bucketsStore.bucketsAFK(this.queryOptions.hostname)[0],
-        filter_afk: this.queryOptions.filter_afk,
-        categories: this.categoryStore.classes_for_query,
-        filter_categories: this.excludeUncategorized
-          ? this.categoryStore.classes_for_query.map(t => t[0])
-          : null,
-        ...useSettingsStore().compiledRulesV2,
+      const filter_categories = this.excludeUncategorized
+        ? this.categoryStore.classes_for_query.map(t => t[0])
+        : null;
+      const { query: query_array } = resolveActivityEventsQuery({
+        host: this.queryOptions.hostname,
+        v2: {
+          filter_afk: this.queryOptions.filter_afk,
+          filter_categories,
+        },
+        legacyParams: {
+          hostname: this.queryOptions.hostname,
+          bid_window: this.bucketsStore.bucketsWindow(this.queryOptions.hostname)[0],
+          bid_afk: this.bucketsStore.bucketsAFK(this.queryOptions.hostname)[0],
+          filter_afk: this.queryOptions.filter_afk,
+          categories: this.categoryStore.classes_for_query,
+          filter_categories,
+          ...useSettingsStore().compiledRulesV2,
+        },
       });
-      query += '; RETURN = events;';
-
-      const query_array = queryStringToArray(query);
       const start = moment(this.queryOptions.start).format();
       const end = moment(this.queryOptions.stop).format();
       const timeperiods = [start + '/' + end];

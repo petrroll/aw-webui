@@ -60,7 +60,7 @@ div
 <script lang="ts">
 import _ from 'lodash';
 import moment from 'moment';
-import { queryStringToArray, resolveActivityProfile } from '~/queries';
+import { resolveActivityEventsQuery } from '~/util/activityQuery';
 import { hostCanResolveProfile } from '~/util/activityProfile';
 
 import 'vue-awesome/icons/plus';
@@ -158,18 +158,22 @@ export default {
 
     // Check current time of alert goals
     check: async function () {
-      let query = resolveActivityProfile({
-        hostname: this.hostname,
-        bid_window: this.bucketsStore.bucketsWindow(this.hostname)[0],
-        bid_afk: this.bucketsStore.bucketsAFK(this.hostname)[0],
-        filter_afk: this.filter_afk,
-        categories: useCategoryStore().classes_for_query,
-        filter_categories: null, // classes.map(c => c[0]),
-        ...useSettingsStore().compiledRulesV2,
+      const { query: query_array } = resolveActivityEventsQuery({
+        host: this.hostname,
+        v2: {
+          filter_afk: this.filter_afk,
+          filter_categories: null,
+        },
+        legacyParams: {
+          hostname: this.hostname,
+          bid_window: this.bucketsStore.bucketsWindow(this.hostname)[0],
+          bid_afk: this.bucketsStore.bucketsAFK(this.hostname)[0],
+          filter_afk: this.filter_afk,
+          categories: useCategoryStore().classes_for_query,
+          filter_categories: null, // classes.map(c => c[0]),
+          ...useSettingsStore().compiledRulesV2,
+        },
       });
-      query += '; RETURN = events;';
-
-      const query_array = queryStringToArray(query);
 
       // Get start of today
       const start = moment().subtract(1, 'days').startOf('day');

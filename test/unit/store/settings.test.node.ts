@@ -3,7 +3,7 @@ import { setActivePinia, createPinia } from 'pinia';
 import { useSettingsStore } from '~/stores/settings';
 import { useServerStore } from '~/stores/server';
 import { getClient } from '~/util/awclient';
-import { defaultBuiltinWindowSource } from '~/util/rulesV2';
+
 
 jest.mock('~/util/awclient', () => ({
   getClient: jest.fn(),
@@ -326,8 +326,8 @@ describe('settings store', () => {
       regex: 'meeting',
     });
 
+    // Window is no longer force-reinjected: a stored profile round-trips unchanged.
     expect(saveMock.mock.calls[0][0].profiles[0].sources).toEqual([
-      defaultBuiltinWindowSource(false),
       ...settingsStore.activity_profiles_v2[0].sources,
     ]);
   });
@@ -372,10 +372,7 @@ describe('settings store', () => {
       sources
     );
 
-    expect(saveMock.mock.calls[0][0].profiles[0].sources).toEqual([
-      defaultBuiltinWindowSource(),
-      ...sources,
-    ]);
+    expect(saveMock.mock.calls[0][0].profiles[0].sources).toEqual([...sources]);
   });
 
   test('saving an active-time draft does not overwrite newer unrelated source edits', async () => {
@@ -430,7 +427,6 @@ describe('settings store', () => {
     );
 
     expect(saveMock.mock.calls[0][0].profiles[0].sources).toEqual([
-      defaultBuiltinWindowSource(false),
       { ...baseline[0], label: 'Browser (renamed elsewhere)' },
       draft[1],
     ]);

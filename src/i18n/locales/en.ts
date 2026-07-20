@@ -276,9 +276,12 @@ export default {
       sourceLabel: 'Name',
       builtinWindowSourceLabel: 'App & window',
       builtinWindowSourceHelp:
-        'Built in. ActivityWatch resolves it separately for each device. AFK behavior is configured under Active time; other watchers are added when a rule needs them.',
+        'The default app & window source. ActivityWatch resolves its device window buckets automatically. In Advanced mode you can rename, re-point, or remove it like any other source; AFK behavior is configured under Active time.',
       builtinWindowFieldsHelp:
         'Choose which fields are available to App & window rules. The defaults are app and title.',
+      builtinWindowBucketsHelp:
+        'Leave empty to auto-discover each device window bucket, or pin exact bucket IDs to override.',
+      builtinWindowDiscoveredBucket: 'Auto-discovered: {bucket} — device: {host}',
       noActivityCreatingSourceWarning:
         'No source can currently create activity periods. Categories will have no time to classify until at least one source is enabled.',
       sourceCreatesActivityEnabled: 'Can create activity periods',
@@ -351,8 +354,8 @@ export default {
       automaticSourceHelp:
         'Matches the active app name and window title. To match other data, such as a browser URL or virtual desktop, choose that watcher above.',
       savedSources: 'Custom data sources',
-      savedWatcherSelections: 'Watcher data not currently available',
-      availableWatcherData: 'Watcher data',
+      savedWatcherSelections: 'Saved watcher data (currently unavailable)',
+      availableWatcherData: 'Available watcher data',
       allDevices: 'All devices',
       sourceAvailableOn: 'available on {hosts}',
       sourceDeviceUnknown: 'device not reported',
@@ -565,7 +568,7 @@ export default {
     docLink: 'documentation',
     allCategories: 'All',
     topApps: 'Top Applications',
-    topTitles: 'Top Window Titles',
+    topTitles: 'Top Titles',
     topDomains: 'Top Browser Domains',
     topUrls: 'Top Browser URLs',
     topBrowserTitles: 'Top Browser Titles',

@@ -113,7 +113,7 @@ import { useCategoryStore } from '~/stores/categories';
 import { useBucketsStore } from '~/stores/buckets';
 import { useSettingsStore } from '~/stores/settings';
 
-import { resolveActivityProfile } from '~/queries';
+import { resolveActivityEventsQuery, remapNamespacedAppTitle } from '~/util/activityQuery';
 import { getClient } from '~/util/awclient';
 import CategoryEditModal from '~/components/CategoryEditModal.vue';
 import { isRegexBroad, validateRegex } from '~/util/validate';
@@ -231,8 +231,13 @@ export default {
       await this.categoryStore.load();
       const awclient = getClient();
       const bucketsStore = useBucketsStore();
-      const query =
-        resolveActivityProfile({
+      const { query, materialized } = resolveActivityEventsQuery({
+        host: this.queryOptions.hostname,
+        v2: {
+          filter_afk: this.queryOptions.filter_afk,
+          filter_categories: [this.category],
+        },
+        legacyParams: {
           hostname: this.queryOptions.hostname,
           bid_window: bucketsStore.bucketsWindow(this.queryOptions.hostname)[0],
           bid_afk: bucketsStore.bucketsAFK(this.queryOptions.hostname)[0],
@@ -240,13 +245,19 @@ export default {
           categories: this.categoryStore.classes_for_query,
           filter_categories: [this.category],
           ...useSettingsStore().compiledRulesV2,
-        }) + 'RETURN = limit_events(sort_by_duration(events), 1000);';
+        },
+        returnStatement: 'RETURN = limit_events(sort_by_duration(events), 1000);',
+      });
       const data = await awclient.query(
         [get_inclusive_local_date_range(this.queryOptions.start, this.queryOptions.stop)],
-        query.split('\n')
+        query
       );
 
-      const events = data[0];
+      // On capable servers app/title live under flat `$source.<id>.app/title`
+      // keys; remap them so phrase extraction keeps reading `title`.
+      const events = materialized
+        ? remapNamespacedAppTitle(data[0], materialized.appTitleSourceId)
+        : data[0];
       this.words = findCommonPhrases(events, this.ignored_words);
       this.loading = false;
     },

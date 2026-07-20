@@ -9,6 +9,7 @@ import { isEqual } from 'lodash';
 import { AppLocale, i18n, isAppLocale, setAppLocale } from '~/i18n';
 import {
   compileProfileQueryOptions,
+  compileActivityQueryV2,
   collectRuleSourceIds,
   applyRulesSimplification,
   categorySetToLegacyClasses,
@@ -24,6 +25,7 @@ import {
   type ActivityProfileV2,
   type CategorySetV2,
   type CompiledProfileQueryOptions,
+  type CompiledActivityQueryV2,
   type RuleExpressionV2,
   type RulesEditorMode,
   type SourceDefinitionV2,
@@ -203,6 +205,36 @@ export const useSettingsStore = defineStore('settings', {
         return undefined;
       }
       return compileProfileQueryOptions(profile, rules.category_sets_v2, capabilities);
+    },
+    // v2-pure compiled options (window as an ordinary namespaced source, no
+    // legacy_window_mode). Consumed via materializeActivityQueryV2 +
+    // resolveActivityProfileV2. Additive to compiledRulesV2 while callers migrate.
+    compiledActivityQueryV2(): CompiledActivityQueryV2 | undefined {
+      const rules = this.rulesV2;
+      const profile = rules.activity_profiles_v2[0];
+      const categorySet = rules.category_sets_v2[0];
+      const capabilities = useServerStore().info?.capabilities ?? [];
+      if (!profile || !categorySet || !capabilities.includes('query.categorize_v2.v1')) {
+        return undefined;
+      }
+      const usesNamespace =
+        profile.sources.some(source => source.creates_activity || source.builtin === 'window') ||
+        categorySet.categories.some(
+          category => collectRuleSourceIds(category.rule).size > 0 || category.rule.type !== 'none'
+        );
+      if (
+        usesNamespace &&
+        !capabilities.includes('query.merge_subwatcher_fields.source_namespace.v1')
+      ) {
+        return undefined;
+      }
+      if (
+        profile.active_time.type === 'expression' &&
+        !capabilities.includes('query.active_periods_v2.v1')
+      ) {
+        return undefined;
+      }
+      return compileActivityQueryV2(profile, rules.category_sets_v2, capabilities);
     },
   },
 

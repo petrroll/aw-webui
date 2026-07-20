@@ -278,7 +278,10 @@ export default {
       sourceLabel: 'Назва',
       builtinWindowSourceLabel: 'Застосунок і вікно',
       builtinWindowSourceHelp:
-        'Вбудоване джерело. ActivityWatch визначає його окремо для кожного пристрою. AFK налаштовується в розділі активного часу; інші watcher-и додаються за потреби.',
+        'Типове джерело застосунку й вікна. ActivityWatch автоматично визначає віконні buckets для кожного пристрою. У розширеному режимі його можна перейменувати, змінити чи вилучити, як будь-яке інше джерело; AFK налаштовується в розділі активного часу.',
+      builtinWindowBucketsHelp:
+        'Залиште порожнім, щоб автоматично визначати віконний bucket кожного пристрою, або вкажіть точні ID buckets, щоб перевизначити.',
+      builtinWindowDiscoveredBucket: 'Визначено автоматично: {bucket} — пристрій: {host}',
       builtinWindowFieldsHelp:
         'Виберіть поля для правил застосунку й вікна. Типово використовуються app і title.',
       noActivityCreatingSourceWarning:
@@ -353,8 +356,8 @@ export default {
       automaticSourceHelp:
         'Перевіряє назву активного застосунку та заголовок вікна. Для інших даних, наприклад URL браузера або віртуального робочого столу, виберіть відповідний спостерігач вище.',
       savedSources: 'Власні джерела даних',
-      savedWatcherSelections: 'Наразі недоступні дані спостерігачів',
-      availableWatcherData: 'Дані спостерігачів',
+      savedWatcherSelections: 'Збережені дані спостерігачів (наразі недоступні)',
+      availableWatcherData: 'Доступні дані спостерігачів',
       allDevices: 'Усі пристрої',
       sourceAvailableOn: 'доступно на {hosts}',
       sourceDeviceUnknown: 'пристрій не вказано',

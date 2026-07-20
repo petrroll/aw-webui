@@ -90,7 +90,7 @@ div
 import moment from 'moment';
 import { get_today_with_offset, format_date_short, format_date_with_weekday } from '~/util/time';
 import { buildBarchartDataset } from '~/util/datasets';
-import { queryStringToArray, resolveActivityProfile } from '~/queries';
+import { resolveActivityEventsQuery } from '~/util/activityQuery';
 import { getClient } from '~/util/awclient';
 import { useBucketsStore } from '~/stores/buckets';
 import { useCategoryStore } from '~/stores/categories';
@@ -361,8 +361,17 @@ export default {
 
     buildCategoryQuery(): string[] {
       const cats = this.categoryStore.classes_for_query;
-      const code =
-        resolveActivityProfile({
+      const returnStatement = `
+        cat_events = sort_by_duration(merge_events_by_keys(events, ["$category"]));
+        RETURN = {"cat_events": cat_events};
+      `;
+      const { query } = resolveActivityEventsQuery({
+        host: this.host,
+        v2: {
+          filter_afk: true,
+          filter_categories: null,
+        },
+        legacyParams: {
           hostname: this.host,
           bid_window: this.bucketsStore.bucketsWindow(this.host)[0],
           bid_afk: this.bucketsStore.bucketsAFK(this.host)[0],
@@ -371,12 +380,10 @@ export default {
           filter_categories: null,
           always_active_pattern: this.settingsStore.always_active_pattern || undefined,
           ...this.settingsStore.compiledRulesV2,
-        }) +
-        `
-        cat_events = sort_by_duration(merge_events_by_keys(events, ["$category"]));
-        RETURN = {"cat_events": cat_events};
-      `;
-      return queryStringToArray(code);
+        },
+        returnStatement,
+      });
+      return query;
     },
   },
 };

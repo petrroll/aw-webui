@@ -44,7 +44,8 @@ div
 <script lang="ts">
 import _ from 'lodash';
 import moment from 'moment';
-import { queryStringToArray, resolveActivityProfile } from '~/queries';
+import { resolveActivityEventsQuery } from '~/util/activityQuery';
+import { BUILTIN_WINDOW_SOURCE_ID } from '~/util/rulesV2';
 import { useBucketsStore } from '~/stores/buckets';
 import { useSettingsStore } from '~/stores/settings';
 
@@ -76,18 +77,47 @@ export default {
       const advanced = useSettingsStore().compiledRulesV2;
       const bucketsStore = useBucketsStore();
       await bucketsStore.ensureLoaded();
-      let query = resolveActivityProfile({
-        hostname: this.queryOptions.hostname,
-        bid_window: bucketsStore.bucketsWindow(this.queryOptions.hostname)[0],
-        bid_afk: bucketsStore.bucketsAFK(this.queryOptions.hostname)[0],
-        filter_afk: this.queryOptions.filter_afk,
-        categories: [[['searched'], { type: 'regex', regex: this.pattern }]],
-        filter_categories: [['searched']],
-        ...(advanced ? { ...advanced, category_specs: undefined } : {}),
+      // v2: search app/title via the configured default window source (builtin_window).
+      // If that source is not configured the searched category matches nothing.
+      const { query: query_array } = resolveActivityEventsQuery({
+        host: this.queryOptions.hostname,
+        v2: {
+          filter_afk: this.queryOptions.filter_afk,
+          filter_categories: [['searched']],
+          category_specs: [
+            {
+              id: 'searched',
+              name: ['searched'],
+              rule: {
+                type: 'any',
+                rules: [
+                  {
+                    type: 'regex',
+                    source: BUILTIN_WINDOW_SOURCE_ID,
+                    field: 'app',
+                    regex: this.pattern,
+                  },
+                  {
+                    type: 'regex',
+                    source: BUILTIN_WINDOW_SOURCE_ID,
+                    field: 'title',
+                    regex: this.pattern,
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        legacyParams: {
+          hostname: this.queryOptions.hostname,
+          bid_window: bucketsStore.bucketsWindow(this.queryOptions.hostname)[0],
+          bid_afk: bucketsStore.bucketsAFK(this.queryOptions.hostname)[0],
+          filter_afk: this.queryOptions.filter_afk,
+          categories: [[['searched'], { type: 'regex', regex: this.pattern }]],
+          filter_categories: [['searched']],
+          ...(advanced ? { ...advanced, category_specs: undefined } : {}),
+        },
       });
-      query += '; RETURN = events;';
-
-      const query_array = queryStringToArray(query);
       const timeperiods = [
         moment(this.queryOptions.start).format() + '/' + moment(this.queryOptions.stop).format(),
       ];

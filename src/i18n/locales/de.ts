@@ -283,7 +283,10 @@ export default {
       sourceLabel: 'Name',
       builtinWindowSourceLabel: 'App & Fenster',
       builtinWindowSourceHelp:
-        'Integriert. ActivityWatch löst diese Quelle für jedes Gerät separat auf. AFK wird unter Aktivzeit konfiguriert; andere Watcher werden bei Bedarf hinzugefügt.',
+        'Die Standardquelle für App & Fenster. ActivityWatch löst ihre Gerätefenster-Buckets automatisch auf. Im Erweitert-Modus können Sie sie wie jede andere Quelle umbenennen, neu zuordnen oder entfernen; AFK wird unter Aktivzeit konfiguriert.',
+      builtinWindowBucketsHelp:
+        'Leer lassen, um das Fenster-Bucket jedes Geräts automatisch zu ermitteln, oder exakte Bucket-IDs angeben, um es zu überschreiben.',
+      builtinWindowDiscoveredBucket: 'Automatisch ermittelt: {bucket} — Gerät: {host}',
       builtinWindowFieldsHelp:
         'Wählen Sie die Felder für App-&-Fenster-Regeln. Standardmäßig sind dies app und title.',
       noActivityCreatingSourceWarning:
@@ -359,8 +362,8 @@ export default {
       automaticSourceHelp:
         'Prüft den Namen der aktiven App und den Fenstertitel. Für andere Daten wie Browser-URL oder virtuellen Desktop wählen Sie oben den entsprechenden Watcher.',
       savedSources: 'Benutzerdefinierte Datenquellen',
-      savedWatcherSelections: 'Derzeit nicht verfügbare Watcher-Daten',
-      availableWatcherData: 'Watcher-Daten',
+      savedWatcherSelections: 'Gespeicherte Watcher-Daten (derzeit nicht verfügbar)',
+      availableWatcherData: 'Verfügbare Watcher-Daten',
       allDevices: 'Alle Geräte',
       sourceAvailableOn: 'verfügbar auf {hosts}',
       sourceDeviceUnknown: 'Gerät nicht gemeldet',

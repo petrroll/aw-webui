@@ -108,7 +108,8 @@ import { getClient } from '~/util/awclient';
 import { useBucketsStore } from '~/stores/buckets';
 import { useCategoryStore } from '~/stores/categories';
 import { useSettingsStore } from '~/stores/settings';
-import { queryStringToArray, resolveActivityProfile, serializeQueryJson } from '~/queries';
+import { serializeQueryJson } from '~/queries';
+import { resolveActivityEventsQuery } from '~/util/activityQuery';
 import { splitCategoryEventsByActivity } from '~/util/timelineCategories';
 
 export default {
@@ -148,8 +149,19 @@ export default {
       const activeTime = settingsStore.rulesV2.activity_profiles_v2[0]?.active_time;
       const afkBucket =
         activeTime?.type === 'legacy' ? bucketsStore.bucketsAFK(this.host)[0] : undefined;
-      const query =
-        resolveActivityProfile({
+      const returnStatement =
+        (afkBucket
+          ? `afk_status = flood(query_bucket(${serializeQueryJson(afkBucket)}));`
+          : 'afk_status = [];') +
+        '\nRETURN = {"activity": events, "active": not_afk, "afk": afk_status};';
+      const { query } = resolveActivityEventsQuery({
+        host: this.host,
+        v2: {
+          filter_afk: false,
+          filter_categories: null,
+          include_audible: activeTime?.type === 'legacy' ? activeTime.include_audible : undefined,
+        },
+        legacyParams: {
           hostname: this.host,
           bid_window: bucketsStore.bucketsWindow(this.host)[0],
           bid_afk: bucketsStore.bucketsAFK(this.host)[0],
@@ -160,14 +172,12 @@ export default {
           categories: categoryStore.classes_for_query,
           filter_categories: null,
           ...settingsStore.compiledRulesV2,
-        }) +
-        (afkBucket
-          ? `\nafk_status = flood(query_bucket(${serializeQueryJson(afkBucket)}));`
-          : '\nafk_status = [];') +
-        '\nRETURN = {"activity": events, "active": not_afk, "afk": afk_status};';
+        },
+        returnStatement,
+      });
       const data = await getClient().query(
         [`${this.starttime.format()}/${this.endtime.format()}`],
-        queryStringToArray(query)
+        query
       );
       return data[0] ?? { activity: [], active: [], afk: [] };
     },

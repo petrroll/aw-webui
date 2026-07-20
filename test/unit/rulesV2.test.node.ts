@@ -203,6 +203,41 @@ describe('rules v2 migration', () => {
     ]);
   });
 
+  test('does not reinject the default window source into a stored profile that omits it', () => {
+    const resolved = resolveRulesV2Settings({
+      activity_profiles_v2: [
+        {
+          schema_version: 2,
+          id: 'default',
+          category_set_ids: ['default'],
+          sources: [
+            {
+              id: 'meeting',
+              label: 'Meeting',
+              bucket_ids: ['aw-watcher-meeting_desktop'],
+              bucket_hosts: { 'aw-watcher-meeting_desktop': 'desktop' },
+              scope: 'host',
+              fields: ['subject'],
+              creates_activity: true,
+            },
+          ],
+          active_time: {
+            type: 'expression',
+            rule: { type: 'regex', source: 'meeting', field: 'subject', regex: '.' },
+          },
+        },
+      ],
+      category_sets_v2: [{ schema_version: 2, id: 'default', categories: [] }],
+      classes: [],
+    });
+
+    const sources = resolved.activity_profiles_v2[0].sources;
+    // Advanced profiles may remove the default window source; it must round-trip
+    // without being force-reinjected on load.
+    expect(sources.some(source => source.builtin === 'window')).toBe(false);
+    expect(sources.map(source => source.id)).toEqual(['meeting']);
+  });
+
   test('moves generated watcher host scope to bucket metadata', () => {
     const resolved = resolveRulesV2Settings({
       activity_profiles_v2: [
@@ -1235,7 +1270,16 @@ describe('v2 profile compiler', () => {
       capabilities
     );
 
+    // A fully explicit (meeting/presence-only) profile has no window privilege: the
+    // window contributes no activity and only the configured source is emitted.
     expect(options.legacy_window_mode).toBe('none');
+    expect(options.activity_coverage_sources.map(source => source.source_id)).toEqual([
+      'presence',
+    ]);
+    expect(
+      options.activity_coverage_sources.some(source => source.source_id === 'builtin_window')
+    ).toBe(false);
+    expect(options.context_sources).toEqual([]);
   });
 
   test('uses legacy window data as context only for advanced always-active matching', () => {

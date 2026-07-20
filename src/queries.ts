@@ -242,7 +242,11 @@ function serializeQueryString(value: string, label: string): string {
   return serializeQueryJson(value);
 }
 
-function requireCapability(params: BaseQueryParams, capability: string, feature: string): void {
+function requireCapability(
+  params: { capabilities?: string[] },
+  capability: string,
+  feature: string
+): void {
   if (!params.capabilities?.includes(capability)) {
     throw new Error(`${feature} requires server capability ${capability}`);
   }
@@ -690,6 +694,99 @@ export function canonicalEvents(params: DesktopQueryParams | AndroidQueryParams)
   return resolveActivityProfile(params);
 }
 
+// ---------------------------------------------------------------------------
+// v2 clean resolver / query path.
+//
+// A source-only pipeline aligned with the Python/Rust engine: it accepts only
+// explicit namespaced sources and never injects or accepts bid_window/bid_afk/
+// bid_browsers/bid_stopwatch, legacy window modes, always-active patterns,
+// replacement/background sources, or root app/title fields. The configured
+// default window source (when present) arrives here as an ordinary coverage or
+// context source with a namespaced source_id. Callers must materialize
+// per-host bucket_ids before building the query (see materializeActivityQueryV2).
+// ---------------------------------------------------------------------------
+
+export interface CanonicalQueryParamsV2 {
+  hostname?: string;
+  category_specs?: CategorySpecV2[];
+  explain_categories?: boolean;
+  context_sources?: ContextSource[];
+  activity_coverage_sources?: ActivityCoverageSource[];
+  active_time_rule?: RuleExpressionV2;
+  active_time_sources?: ActiveTimeSource[];
+  capabilities?: string[];
+  filter_categories: string[][] | null;
+  filter_afk?: boolean;
+  return_variable_suffix?: string;
+}
+
+export function resolveActivityProfileV2(params: CanonicalQueryParamsV2): string {
+  const hasCategorySpecs = params.category_specs !== undefined;
+  const category_specs = params.category_specs ?? [];
+  if (hasCategorySpecs) {
+    requireCapability(params, RULE_ENGINE_CAPABILITIES.categorize, 'Flexible categorization');
+    if (params.explain_categories) {
+      requireCapability(
+        params,
+        RULE_ENGINE_CAPABILITIES.explainCategorize,
+        'Category explanations'
+      );
+    }
+  }
+  const hasActiveTimeRule = !!params.active_time_rule;
+  // Adapt to the shared source-only helpers without ever setting a root/legacy
+  // field (no bid_window, bid_afk, legacy_window_mode, always_active_pattern).
+  const helperParams: DesktopQueryParams = {
+    hostname: params.hostname,
+    categories: [],
+    filter_categories: params.filter_categories,
+    filter_afk: params.filter_afk ?? false,
+    category_specs: params.category_specs,
+    explain_categories: params.explain_categories,
+    context_sources: params.context_sources,
+    activity_coverage_sources: params.activity_coverage_sources,
+    active_time_rule: params.active_time_rule,
+    active_time_sources: params.active_time_sources,
+    capabilities: params.capabilities,
+    return_variable_suffix: params.return_variable_suffix,
+  };
+  return [
+    'events = [];',
+    hasActiveTimeRule ? '' : 'not_afk = [];',
+    activityCoverageEvents(helperParams),
+    activeTimeEvents(helperParams),
+    params.filter_afk
+      ? hasActiveTimeRule
+        ? 'events = filter_period_intersect(events, not_afk);'
+        : 'events = filter_period_intersect(events, not_afk);'
+      : '',
+    contextEvents(helperParams),
+    hasCategorySpecs
+      ? `events = ${
+          params.explain_categories ? 'categorize_v2_explain' : 'categorize_v2'
+        }(events, ${serializeQueryJson(category_specs)}${
+          params.hostname ? `, ${serializeQueryJson(params.hostname)}` : ''
+        });`
+      : '',
+    params.filter_categories
+      ? `events = filter_keyvals(events, "$category", ${serializeQueryJson(
+          params.filter_categories
+        )});`
+      : '',
+    params.return_variable_suffix
+      ? `events_${params.return_variable_suffix} = events;
+         not_afk_${params.return_variable_suffix} = not_afk;`
+      : '',
+  ]
+    .filter(part => part !== '')
+    .join('\n');
+}
+
+// Compatibility alias mirroring canonicalEvents for the v2 pipeline.
+export function canonicalEventsV2(params: CanonicalQueryParamsV2): string {
+  return resolveActivityProfileV2(params);
+}
+
 export function canonicalMultideviceEvents(params: MultiQueryParams): string {
   const hostParams = params.hosts.map((hostname, index) =>
     get_params(params, hostname, `host_${index}`)
@@ -748,6 +845,34 @@ export function canonicalMultideviceEvents(params: MultiQueryParams): string {
 }
 
 const default_limit = 100; // Hardcoded limit per group
+
+// v2 multidevice canonical events: unions per-host source-only events and active
+// periods into `events` / `not_afk`, optionally filtering by category. No
+// bid_window / background / root injection. Leaves `events` populated for the
+// caller to summarize or return.
+export function canonicalMultideviceEventsV2(
+  perHostParams: CanonicalQueryParamsV2[],
+  filterCategories?: string[][] | null
+): string {
+  const prelude = perHostParams
+    .map((params, index) =>
+      resolveActivityProfileV2({ ...params, return_variable_suffix: `host_${index}` })
+    )
+    .join('\n');
+  let query = `${prelude}\nevents = [];\nnot_afk = [];\n`;
+  for (let i = 0; i < perHostParams.length; i++) {
+    query += `
+    events = union_no_overlap(events, events_host_${i});
+    not_afk = union_no_overlap(not_afk, not_afk_host_${i});
+    `;
+  }
+  if (filterCategories) {
+    query += `events = filter_keyvals(events, "$category", ${serializeQueryJson(
+      filterCategories
+    )});`;
+  }
+  return query;
+}
 
 export function appQuery(
   appbucket: string,
@@ -956,6 +1081,192 @@ export function multideviceQuery(params: MultiQueryParams): string[] {
   );
 }
 
+// ---------------------------------------------------------------------------
+// v2 report builders — emit a generic `activity` section (never an authoritative
+// `window`). App/title summaries are a presentation projection from an explicit
+// configured source whose flat fields include app/title, using the flat
+// namespaced keys `$source.<id>.app` / `$source.<id>.title`. When no such source
+// is configured the app/title arrays are simply empty. Browser focus filters
+// canonical events on an explicit `$source.<id>.app` key, never a root app field.
+// ---------------------------------------------------------------------------
+
+export interface ActivityReportParamsV2 extends CanonicalQueryParamsV2 {
+  // Configured source whose flat fields include app/title (e.g. builtin_window).
+  app_title_source_id?: string;
+  // Configured source whose flat field includes app, used to detect browser focus.
+  browser_focus_source_id?: string;
+  browser_bucket_ids?: string[];
+  // Coverage source id under which stopwatch labels were merged.
+  stopwatch_source_id?: string;
+}
+
+function namespacedKey(sourceId: string, field: string): string {
+  return `$source.${sourceId}.${field}`;
+}
+
+// Browser enrichment for the v2 pipeline: focus is derived from an explicit
+// namespaced source key rather than a root app field.
+function browserEventsV2(browserBucketIds: string[], focusAppKey: string): string {
+  let code = `
+    browser_events = [];
+  `;
+  _.each(browsersWithBuckets(browserBucketIds), ([browserName, bucketId]) => {
+    const browser_appnames_str = serializeQueryJson(browser_appnames[browserName]);
+    code += `events_${browserName} = flood(query_bucket(${serializeQueryString(
+      bucketId,
+      'Browser bucket ID'
+    )}));
+       window_${browserName} = filter_keyvals(events, ${serializeQueryJson(
+      focusAppKey
+    )}, ${browser_appnames_str});`;
+    const pattern = browser_appname_regex[browserName];
+    if (pattern) {
+      code += `
+       window_${browserName}_re = filter_keyvals_regex(events, ${serializeQueryJson(
+        focusAppKey
+      )}, ${serializeQueryJson(pattern)});
+       window_${browserName} = sort_by_timestamp(concat(window_${browserName}, window_${browserName}_re));`;
+    }
+    code += `
+       events_${browserName} = filter_period_intersect(events_${browserName}, window_${browserName});
+       events_${browserName} = split_url_events(events_${browserName});
+       browser_events = concat(browser_events, events_${browserName});
+       browser_events = sort_by_timestamp(browser_events);`;
+  });
+  return code;
+}
+
+// Report tail shared by single- and multi-host v2 report builders. Operates on
+// an already-populated `events` (canonical, categorized) and `not_afk` variable.
+function activityReportTail(params: ActivityReportParamsV2): string {
+  const appKey = params.app_title_source_id
+    ? namespacedKey(params.app_title_source_id, 'app')
+    : undefined;
+  const titleKey = params.app_title_source_id
+    ? namespacedKey(params.app_title_source_id, 'title')
+    : undefined;
+  const focusAppKey = params.browser_focus_source_id
+    ? namespacedKey(params.browser_focus_source_id, 'app')
+    : undefined;
+  const stopwatchKey = params.stopwatch_source_id
+    ? namespacedKey(params.stopwatch_source_id, 'label')
+    : undefined;
+
+  const appTitleSection =
+    appKey && titleKey
+      ? `
+    title_events = sort_by_duration(merge_events_by_keys(events, [${serializeQueryJson(
+      appKey
+    )}, ${serializeQueryJson(titleKey)}]));
+    app_events   = sort_by_duration(merge_events_by_keys(title_events, [${serializeQueryJson(
+      appKey
+    )}]));
+    app_events  = limit_events(app_events, ${default_limit});
+    title_events  = limit_events(title_events, ${default_limit});`
+      : `
+    title_events = [];
+    app_events = [];`;
+
+  const browserSection = focusAppKey
+    ? browserEventsV2(params.browser_bucket_ids ?? [], focusAppKey)
+    : 'browser_events = [];';
+
+  const stopwatchSection = stopwatchKey
+    ? `stopwatch_events = merge_events_by_keys(events, [${serializeQueryJson(stopwatchKey)}]);
+       stopwatch_events = filter_keyvals_regex(stopwatch_events, ${serializeQueryJson(
+         stopwatchKey
+       )}, ".");
+       stopwatch_events = sort_by_duration(stopwatch_events);
+       stopwatch_events = limit_events(stopwatch_events, ${default_limit});`
+    : 'stopwatch_events = [];';
+
+  return `
+    ${appTitleSection}
+    cat_events   = sort_by_duration(merge_events_by_keys(events, ["$category"]));
+    duration = sum_durations(events);
+    ${browserSection}
+    browser_events = split_url_events(browser_events);
+    browser_urls = merge_events_by_keys(browser_events, ["url"]);
+    browser_urls = sort_by_duration(browser_urls);
+    browser_urls = limit_events(browser_urls, ${default_limit});
+    browser_domains = merge_events_by_keys(browser_events, ["$domain"]);
+    browser_domains = sort_by_duration(browser_domains);
+    browser_domains = limit_events(browser_domains, ${default_limit});
+    browser_titles = merge_events_by_keys(browser_events, ["title"]);
+    browser_titles = sort_by_duration(browser_titles);
+    browser_titles = limit_events(browser_titles, ${default_limit});
+    browser_duration = sum_durations(browser_events);
+    ${stopwatchSection}
+    RETURN = {
+        "activity": {
+            "app_events": app_events,
+            "title_events": title_events,
+            "cat_events": cat_events,
+            "active_events": not_afk,
+            "duration": duration
+        },
+        "browser": {
+            "domains": browser_domains,
+            "urls": browser_urls,
+            "titles": browser_titles,
+            "duration": browser_duration
+        },
+        "stopwatch": {
+            "stopwatch_events": stopwatch_events
+        }
+    };`;
+}
+
+export function fullActivityQueryV2(params: ActivityReportParamsV2): string[] {
+  return queryStringToArray(
+    `
+    ${resolveActivityProfileV2(params)}
+    ${activityReportTail(params)}`
+  );
+}
+
+// Multi-device v2 report: unions per-host canonical events and active periods,
+// then runs the same generic report tail. The app/title/browser/stopwatch
+// projection is taken from the shared configuration (source ids are identical
+// across hosts). Browser buckets from all hosts are supplied on `projection`.
+export function fullActivityMultiQueryV2(
+  perHostParams: CanonicalQueryParamsV2[],
+  projection: {
+    app_title_source_id?: string;
+    browser_focus_source_id?: string;
+    browser_bucket_ids?: string[];
+    stopwatch_source_id?: string;
+  }
+): string[] {
+  const prelude = perHostParams
+    .map((params, index) =>
+      resolveActivityProfileV2({ ...params, return_variable_suffix: `mdev_${index}` })
+    )
+    .join('\n');
+  const unions = perHostParams
+    .map(
+      (_params, index) =>
+        `events = union_no_overlap(events, events_mdev_${index});
+         not_afk = union_no_overlap(not_afk, not_afk_mdev_${index});`
+    )
+    .join('\n');
+  return queryStringToArray(
+    `
+    ${prelude}
+    events = [];
+    not_afk = [];
+    ${unions}
+    ${activityReportTail({
+      hostname: '',
+      filter_categories: null,
+      app_title_source_id: projection.app_title_source_id,
+      browser_focus_source_id: projection.browser_focus_source_id,
+      browser_bucket_ids: projection.browser_bucket_ids,
+      stopwatch_source_id: projection.stopwatch_source_id,
+    })}`
+  );
+}
+
 export function editorActivityQuery(editorbuckets: string[]): string[] {
   let q = ['events = [];'];
   for (const editorbucket of editorbuckets) {
@@ -1018,12 +1329,47 @@ export function categoryQuery(
   return queryStringToArray(q);
 }
 
+// v2 category-only queries: yield `{ cat_events }` from the source-only pipeline.
+export function categoryActivityQueryV2(params: CanonicalQueryParamsV2): string[] {
+  return queryStringToArray(
+    `
+  ${resolveActivityProfileV2(params)}
+  cat_events   = sort_by_duration(merge_events_by_keys(events, ["$category"]));
+  RETURN = { "cat_events": cat_events };
+`
+  );
+}
+
+export function categoryActivityMultiQueryV2(perHostParams: CanonicalQueryParamsV2[]): string[] {
+  const prelude = perHostParams
+    .map((params, index) =>
+      resolveActivityProfileV2({ ...params, return_variable_suffix: `mdev_${index}` })
+    )
+    .join('\n');
+  const unions = perHostParams
+    .map((_params, index) => `events = union_no_overlap(events, events_mdev_${index});`)
+    .join('\n');
+  return queryStringToArray(
+    `
+  ${prelude}
+  events = [];
+  ${unions}
+  cat_events   = sort_by_duration(merge_events_by_keys(events, ["$category"]));
+  RETURN = { "cat_events": cat_events };
+`
+  );
+}
+
 export default {
   fullDesktopQuery,
+  fullActivityQueryV2,
+  fullActivityMultiQueryV2,
   multideviceQuery,
   appQuery,
   activityQuery,
   activityQueryAndroid,
   categoryQuery,
+  categoryActivityQueryV2,
+  categoryActivityMultiQueryV2,
   editorActivityQuery,
 };

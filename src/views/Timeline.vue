@@ -124,13 +124,16 @@ import { mapState } from 'pinia';
 import { useSettingsStore } from '~/stores/settings';
 import { useBucketsStore } from '~/stores/buckets';
 import { getClient } from '~/util/awclient';
-import { queryStringToArray, resolveActivityProfile } from '~/queries';
-import { hostCanResolveProfile, hostHasResolvedActiveTime } from '~/util/activityProfile';
+import {
+  hostCanResolveProfile,
+  hostHasResolvedActiveTime,
+  hostHasResolvedActiveTimeV2,
+} from '~/util/activityProfile';
+import { resolveActivityEventsQuery } from '~/util/activityQuery';
 import { useCategoryStore } from '~/stores/categories';
 import { seconds_to_duration } from '~/util/time';
 import {
   buildTimelineCategoryColorResolver,
-  buildTimelineCategoryQuery,
   filterTimelineBucketsByPeriods,
   splitCategoryEventsByActivity,
 } from '~/util/timelineCategories';
@@ -363,8 +366,20 @@ export default {
           try {
             const profile = settingsStore.rulesV2.activity_profiles_v2[0];
             const activeTime = profile?.active_time;
-            const queryCode = buildTimelineCategoryQuery(
-              resolveActivityProfile({
+            const timelineReturn = `
+      category_events = events;
+      RETURN = {"all": category_events, "active": not_afk};
+    `;
+            const { query: queryArray } = resolveActivityEventsQuery({
+              host: hostname,
+              v2: {
+                filter_afk: false,
+                filter_categories:
+                  this.filter_categories.length > 0 ? this.filter_categories : null,
+                include_audible:
+                  activeTime?.type === 'legacy' ? activeTime.include_audible : undefined,
+              },
+              legacyParams: {
                 hostname,
                 bid_window: windowBucketIds[0],
                 bid_afk: afkBucketIds[0],
@@ -378,16 +393,24 @@ export default {
                 filter_categories:
                   this.filter_categories.length > 0 ? this.filter_categories : null,
                 ...(advanced ?? {}),
-              })
-            );
+              },
+              returnStatement: timelineReturn,
+            });
             const period = `${this.daterange[0].format()}/${this.daterange[1].format()}`;
-            const data = await getClient().query([period], queryStringToArray(queryCode));
+            const data = await getClient().query([period], queryArray);
             const result = data[0] ?? {};
-            const hasActiveTime = hostHasResolvedActiveTime(
-              hostname,
-              bucketsStore.buckets,
-              advanced
-            );
+            const hasActiveTime = settingsStore.compiledActivityQueryV2
+              ? hostHasResolvedActiveTimeV2(
+                  hostname,
+                  bucketsStore.buckets,
+                  settingsStore.compiledActivityQueryV2,
+                  {
+                    includeAudible:
+                      activeTime?.type === 'legacy' ? activeTime.include_audible : undefined,
+                    browserBucketIds: bucketsStore.bucketsBrowser(hostname),
+                  }
+                )
+              : hostHasResolvedActiveTime(hostname, bucketsStore.buckets, advanced);
             const categoryEvents = result.all ?? [];
             const activeEvents = hasActiveTime ? result.active ?? [] : categoryEvents;
             const events = splitCategoryEventsByActivity(categoryEvents, activeEvents).map(

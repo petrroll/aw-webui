@@ -148,6 +148,68 @@ export interface CompiledProfileQueryOptions {
   legacy_window_fields: string[];
 }
 
+// ---------------------------------------------------------------------------
+// v2-pure compiled representation (no legacy window privilege).
+//
+// Unlike CompiledProfileQueryOptions (retained for the legacy query path and
+// un-migrated callers), this representation never carries legacy_window_mode.
+// The configured default window source is compiled into an ordinary namespaced
+// coverage/context source (identified by builtin: 'window' + source_id
+// BUILTIN_WINDOW_SOURCE_ID), with empty bucket_ids that are filled per-host by
+// materializeActivityQueryV2. Unsourced legacy category rules are rewritten to
+// reference `source: builtin_window`.
+// ---------------------------------------------------------------------------
+
+export interface CompiledCoverageSourceV2 {
+  source_id: string;
+  builtin?: 'window';
+  bucket_ids: string[];
+  scope?: 'host' | 'global';
+  bucket_hosts?: Record<string, string>;
+  fields: string[];
+  host?: string;
+}
+
+export interface CompiledContextSourceV2 extends CompiledCoverageSourceV2 {
+  conflict: 'base_wins';
+}
+
+export interface CompiledActiveSourceV2 {
+  source_id: string;
+  builtin?: 'window' | 'afk';
+  bucket_ids: string[];
+  scope?: 'host' | 'global';
+  bucket_hosts?: Record<string, string>;
+  host?: string;
+}
+
+export interface CompiledLegacyActiveTimeV2 {
+  use_afk: boolean;
+  include_audible: boolean;
+  always_active_pattern: string;
+}
+
+export interface CompiledActivityQueryV2 {
+  category_specs: Array<{
+    id: string;
+    name: string[];
+    rule: RuleExpressionV2;
+    priority?: number;
+    requires?: string[];
+  }>;
+  context_sources: CompiledContextSourceV2[];
+  activity_coverage_sources: CompiledCoverageSourceV2[];
+  active_time_rule?: RuleExpressionV2;
+  active_time_sources: CompiledActiveSourceV2[];
+  /**
+   * Present when the profile keeps legacy active-time settings. Materialization
+   * synthesizes an explicit AFK source/rule (and optional window always-active
+   * branch) from these on capable hosts.
+   */
+  legacy_active_time?: CompiledLegacyActiveTimeV2;
+  capabilities: string[];
+}
+
 export function defaultBuiltinWindowSource(createsActivity = true): SourceDefinitionV2 {
   return {
     id: BUILTIN_WINDOW_SOURCE_ID,
@@ -168,15 +230,6 @@ function isDefaultBuiltinWindowSource(source: SourceDefinitionV2): boolean {
     source.fields.length === defaults.fields.length &&
     source.fields.every((field, index) => field === defaults.fields[index])
   );
-}
-
-function withBuiltinWindowSource(
-  sources: SourceDefinitionV2[],
-  createsActivity: boolean
-): SourceDefinitionV2[] {
-  return sources.some(source => source.builtin === 'window')
-    ? sources
-    : [defaultBuiltinWindowSource(createsActivity), ...sources];
 }
 
 export function mergeSourceDefinitionChanges(
@@ -386,10 +439,10 @@ export function resolveRulesV2Settings(input: {
     category_set_ids: profile.category_set_ids.includes(normalizedSet.id)
       ? [normalizedSet.id, ...profile.category_set_ids.filter(id => id !== normalizedSet.id)]
       : [normalizedSet.id],
-    sources: withBuiltinWindowSource(
-      profile.sources,
-      getLegacyWindowMode(profile, normalizedSet) === 'activity'
-    ).map(source => {
+    // Do not force-reinject the default window source on every load: an Advanced
+    // profile that legitimately removed it must round-trip unchanged. The window
+    // source is seeded only by migrateLegacySettings when creating a fresh profile.
+    sources: profile.sources.map(source => {
       const normalized: SourceDefinitionV2 = {
         ...source,
         bucket_ids: [...source.bucket_ids],
@@ -711,18 +764,7 @@ export function validateActivityProfile(
       if (source.builtin !== 'window' || source.id !== BUILTIN_WINDOW_SOURCE_ID) {
         errors.push(`sources[${index}].builtin is unsupported`);
       }
-      if (source.bucket_ids.length > 0) {
-        errors.push(`sources[${index}].builtin cannot define bucket_ids`);
-      }
-      if (source.fields.length === 0) {
-        errors.push(`sources[${index}].fields must be non-empty`);
-      }
-      if (source.creates_activity !== undefined && typeof source.creates_activity !== 'boolean') {
-        errors.push(`sources[${index}].creates_activity must be boolean`);
-      }
-      continue;
-    }
-    if (source.bucket_ids.length === 0) {
+    } else if (source.bucket_ids.length === 0) {
       errors.push(`sources[${index}].bucket_ids must be non-empty`);
     }
     if (source.fields.length === 0) {
@@ -733,6 +775,9 @@ export function validateActivityProfile(
     }
     if (source.host !== undefined && !source.host) {
       errors.push(`sources[${index}].host must be non-empty`);
+    }
+    if (source.builtin && source.bucket_ids.length === 0) {
+      continue;
     }
     const mappedBucketIds = Object.keys(source.bucket_hosts ?? {});
     const hasCompleteBucketHosts =
@@ -776,9 +821,9 @@ export function validateActivityProfile(
       const source = profile.sources.find(candidate => candidate.id === sourceId);
       if (!source) {
         errors.push(`active_time.rule references unknown source ${sourceId}`);
-      } else if (source.builtin) {
-        errors.push(`active_time.rule must use App & window without a source reference`);
       }
+      // v2 allows explicit `source: builtin_window` references; the builtin window
+      // source compiles into an ordinary namespaced coverage/context source.
     }
   }
   return errors;
@@ -826,9 +871,9 @@ export function validateProfileRulesV2(
         const source = profile.sources.find(candidate => candidate.id === sourceId);
         if (!source) {
           errors.push(`category ${category.id} references unknown source ${sourceId}`);
-        } else if (source.builtin) {
-          errors.push(`category ${category.id} must use App & window without a source reference`);
         }
+        // v2 allows explicit `source: builtin_window` references; the builtin window
+        // source compiles into an ordinary namespaced coverage/context source.
       }
     }
   }
@@ -935,6 +980,177 @@ export function compileProfileQueryOptions(
         host: source.host,
       }));
   }
+  return result;
+}
+
+function rewriteUnsourcedToWindow(expression: RuleExpressionV2): RuleExpressionV2 {
+  if (expression.type === 'regex') {
+    return expression.source ? expression : { ...expression, source: BUILTIN_WINDOW_SOURCE_ID };
+  }
+  if (expression.type === 'all' || expression.type === 'any') {
+    return { ...expression, rules: expression.rules.map(rewriteUnsourcedToWindow) };
+  }
+  return expression;
+}
+
+// Compiles a v2 profile into the v2-pure representation. The configured default
+// window source becomes an ordinary namespaced coverage/context source; unsourced
+// legacy category rules are rewritten to `source: builtin_window`. No
+// legacy_window_mode/root injection is ever produced.
+export function compileActivityQueryV2(
+  profile: ActivityProfileV2,
+  categorySets: CategorySetV2[],
+  capabilities: string[]
+): CompiledActivityQueryV2 {
+  const errors = validateProfileRulesV2(profile, categorySets);
+  if (errors.length > 0) {
+    throw new Error(`Invalid v2 rules settings: ${errors.join('; ')}`);
+  }
+  if (
+    profile.active_time.type === 'legacy' &&
+    profile.active_time.always_active_pattern &&
+    !profile.sources.some(source => source.builtin === 'window')
+  ) {
+    // Capable v2 path: removing the window source while an always-active pattern
+    // still depends on it must surface as validation rather than being silently
+    // rediscovered at runtime. (Legacy compileProfileQueryOptions keeps the old
+    // discover-window-as-context behavior for old-server compatibility.)
+    throw new Error(
+      'Invalid v2 rules settings: active_time.always_active_pattern requires a configured window source; remove the pattern or re-add the window source'
+    );
+  }
+  if (!capabilities.includes('query.categorize_v2.v1')) {
+    throw new Error('Flexible categorization requires server capability query.categorize_v2.v1');
+  }
+  const categorySet = categorySets.find(candidate => candidate.id === profile.category_set_ids[0]);
+  if (!categorySet) {
+    throw new Error(`Category set ${profile.category_set_ids[0]} is unavailable`);
+  }
+
+  const category_specs = categorySet.categories.map(category => ({
+    id: category.id,
+    name: [...category.name],
+    rule: rewriteUnsourcedToWindow(JSON.parse(JSON.stringify(category.rule)) as RuleExpressionV2),
+    ...(category.priority !== undefined ? { priority: category.priority } : {}),
+    requires: category.requires ? [...category.requires] : undefined,
+  }));
+
+  const categorySourceIds = new Set(
+    category_specs.flatMap(category => [...collectRuleSourceIds(category.rule)])
+  );
+
+  const activity_coverage_sources: CompiledCoverageSourceV2[] = [];
+  const context_sources: CompiledContextSourceV2[] = [];
+  for (const source of profile.sources) {
+    if (source.builtin === 'window') {
+      const location = {
+        bucket_ids: [...source.bucket_ids],
+        scope: source.bucket_ids.length === 0 ? ('host' as const) : source.scope,
+        ...(source.bucket_hosts ? { bucket_hosts: { ...source.bucket_hosts } } : {}),
+        host: source.host,
+      };
+      if (source.creates_activity) {
+        activity_coverage_sources.push({
+          source_id: BUILTIN_WINDOW_SOURCE_ID,
+          builtin: 'window',
+          ...location,
+          fields: [...source.fields],
+        });
+      } else if (categorySourceIds.has(BUILTIN_WINDOW_SOURCE_ID)) {
+        context_sources.push({
+          source_id: BUILTIN_WINDOW_SOURCE_ID,
+          builtin: 'window',
+          ...location,
+          fields: [...source.fields],
+          conflict: 'base_wins',
+        });
+      }
+      continue;
+    }
+    if (source.creates_activity) {
+      activity_coverage_sources.push({
+        source_id: source.id,
+        bucket_ids: [...source.bucket_ids],
+        scope: source.scope,
+        ...(source.bucket_hosts ? { bucket_hosts: { ...source.bucket_hosts } } : {}),
+        fields: [...source.fields],
+        host: source.host,
+      });
+    } else if (categorySourceIds.has(source.id)) {
+      context_sources.push({
+        source_id: source.id,
+        bucket_ids: [...source.bucket_ids],
+        scope: source.scope,
+        ...(source.bucket_hosts ? { bucket_hosts: { ...source.bucket_hosts } } : {}),
+        fields: [...source.fields],
+        conflict: 'base_wins',
+        host: source.host,
+      });
+    }
+  }
+
+  const needsNamespace = activity_coverage_sources.length > 0 || context_sources.length > 0;
+  if (
+    needsNamespace &&
+    !capabilities.includes('query.merge_subwatcher_fields.source_namespace.v1')
+  ) {
+    throw new Error(
+      'Namespaced source enrichment requires server capability ' +
+        'query.merge_subwatcher_fields.source_namespace.v1'
+    );
+  }
+
+  const result: CompiledActivityQueryV2 = {
+    category_specs,
+    context_sources,
+    activity_coverage_sources,
+    active_time_sources: [],
+    capabilities: [...capabilities],
+  };
+
+  if (profile.active_time.type === 'expression') {
+    if (!capabilities.includes('query.active_periods_v2.v1')) {
+      throw new Error(
+        'Active-time expressions require server capability query.active_periods_v2.v1'
+      );
+    }
+    result.active_time_rule = JSON.parse(
+      JSON.stringify(profile.active_time.rule)
+    ) as RuleExpressionV2;
+    const activeSourceIds = collectRuleSourceIds(result.active_time_rule);
+    for (const source of profile.sources) {
+      if (
+        !activeSourceIds.has(source.builtin === 'window' ? BUILTIN_WINDOW_SOURCE_ID : source.id)
+      ) {
+        continue;
+      }
+      if (source.builtin === 'window') {
+        result.active_time_sources.push({
+          source_id: BUILTIN_WINDOW_SOURCE_ID,
+          builtin: 'window',
+          bucket_ids: [...source.bucket_ids],
+          scope: source.bucket_ids.length === 0 ? 'host' : source.scope,
+          ...(source.bucket_hosts ? { bucket_hosts: { ...source.bucket_hosts } } : {}),
+          host: source.host,
+        });
+      } else {
+        result.active_time_sources.push({
+          source_id: source.id,
+          bucket_ids: [...source.bucket_ids],
+          scope: source.scope,
+          ...(source.bucket_hosts ? { bucket_hosts: { ...source.bucket_hosts } } : {}),
+          host: source.host,
+        });
+      }
+    }
+  } else {
+    result.legacy_active_time = {
+      use_afk: profile.active_time.use_afk,
+      include_audible: profile.active_time.include_audible,
+      always_active_pattern: profile.active_time.always_active_pattern,
+    };
+  }
+
   return result;
 }
 

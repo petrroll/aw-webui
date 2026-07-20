@@ -5,7 +5,11 @@ import { map, filter, values, groupBy, sortBy, flow, reverse } from 'lodash/fp';
 import { IEvent } from '~/util/interfaces';
 
 import { window_events } from '~/util/fakedata';
-import queries, { queryStringToArray, resolveActivityProfile } from '~/queries';
+import queries, {
+  queryStringToArray,
+  resolveActivityProfile,
+  resolveActivityProfileV2,
+} from '~/queries';
 import { get_day_start_with_offset } from '~/util/time';
 import {
   TimePeriod,
@@ -23,9 +27,19 @@ import { useCategoryStore } from '~/stores/categories';
 import {
   hostHasResolvedActivity,
   hostHasResolvedActiveTime,
+  hostHasResolvedActivityV2,
+  hostHasResolvedActiveTimeV2,
   queryNeedsResolvedActiveTime,
 } from '~/util/activityProfile';
 export { queryNeedsResolvedActiveTime } from '~/util/activityProfile';
+
+import {
+  buildFullActivityQueryV2,
+  buildFullActivityMultiQueryV2,
+  materializeHostActivityV2,
+  remapNamespacedAppTitle,
+  type HostActivityInput,
+} from '~/util/activityQuery';
 
 import { getClient } from '~/util/awclient';
 
@@ -63,6 +77,42 @@ function scoreCategories(events: IEvent[]): IEvent[] {
   });
 }
 
+// Builds the central v2 host input on capable servers (where a compiled v2 query
+// exists). Callers use this to materialize a source-only query per host without
+// ever hand-injecting bid_window / bid_afk / always_active_pattern / bid_stopwatch.
+// Returns undefined on old servers / custom setups without a compiled v2 query,
+// in which case callers fall back to the legacy resolveActivityProfile path.
+function hostActivityInputV2(
+  host: string,
+  opts: {
+    filter_afk?: boolean;
+    filter_categories?: string[][] | null;
+    include_stopwatch?: boolean;
+    include_audible?: boolean;
+    explain_categories?: boolean;
+    return_variable_suffix?: string;
+    category_specs?: HostActivityInput['category_specs'];
+  } = {}
+): HostActivityInput | undefined {
+  const settingsStore = useSettingsStore();
+  const bucketsStore = useBucketsStore();
+  const compiledV2 = settingsStore.compiledActivityQueryV2;
+  if (!compiledV2) return undefined;
+  return {
+    host,
+    buckets: bucketsStore.buckets,
+    compiledV2,
+    filter_afk: opts.filter_afk,
+    filter_categories: opts.filter_categories ?? null,
+    include_stopwatch: opts.include_stopwatch,
+    include_audible: opts.include_audible,
+    browser_bucket_ids: bucketsStore.bucketsBrowser(host),
+    explain_categories: opts.explain_categories,
+    return_variable_suffix: opts.return_variable_suffix,
+    category_specs: opts.category_specs,
+  };
+}
+
 export interface QueryOptions {
   host: string;
   date?: string;
@@ -79,7 +129,7 @@ export interface QueryOptions {
 interface State {
   loaded: boolean;
 
-  window: {
+  activity: {
     available: boolean;
     top_apps: IEvent[];
     top_titles: IEvent[];
@@ -145,7 +195,7 @@ export const useActivityStore = defineStore('activity', {
     // set to true once loading has started
     loaded: false,
 
-    window: {
+    activity: {
       available: false,
       top_apps: [],
       top_titles: [],
@@ -258,7 +308,7 @@ export const useActivityStore = defineStore('activity', {
         // TODO: These queries can actually run in parallel, but since server won't process them in parallel anyway we won't.
         this.set_available();
 
-        if (this.window.available) {
+        if (this.activity.available) {
           console.info(
             settingsStore.useMultidevice ? 'Querying multiple devices' : 'Querying a single device'
           );
@@ -275,7 +325,7 @@ export const useActivityStore = defineStore('activity', {
           console.log(
             'Cannot query activity because no eligible activity source and active-time source were resolved'
           );
-          this.query_window_completed();
+          this.query_activity_completed();
           this.query_category_time_by_period_completed();
         }
 
@@ -298,7 +348,7 @@ export const useActivityStore = defineStore('activity', {
         }
 
         // Perform this last, as it takes the longest
-        if (this.window.available || this.android.available) {
+        if (this.activity.available || this.android.available) {
           await this.query_category_time_by_period(query_options);
         }
       } else {
@@ -326,12 +376,12 @@ export const useActivityStore = defineStore('activity', {
           : undefined
       );
       const data = await getClient().query(periods, q).catch(this.errorHandler);
-      this.query_window_completed(data[0]);
+      this.query_activity_completed(data[0]);
     },
 
     async reset() {
       getClient().abort();
-      this.query_window_completed({});
+      this.query_activity_completed({});
       this.query_browser_completed({});
       this.query_editor_completed({});
       this.query_category_time_by_period_completed({});
@@ -343,14 +393,53 @@ export const useActivityStore = defineStore('activity', {
         filter_categories,
         filter_afk,
         include_audible,
+        include_stopwatch,
         always_active_pattern,
       }: QueryOptions,
       hosts: string[]
     ) {
       const periods = [timeperiodToStr(timeperiod)];
       const categories = useCategoryStore().classes_for_query;
-      const host_params = this.multideviceHostParams(hosts, true);
 
+      // Capable servers: union per-host source-only v2 queries (no bid_window).
+      const v2Inputs = hosts
+        .map(host =>
+          hostActivityInputV2(host, {
+            filter_afk,
+            filter_categories,
+            include_stopwatch,
+            include_audible,
+          })
+        )
+        .filter((input): input is HostActivityInput => input !== undefined);
+      const built =
+        v2Inputs.length === hosts.length && v2Inputs.length > 0
+          ? buildFullActivityMultiQueryV2(v2Inputs)
+          : null;
+      if (built) {
+        const data = await getClient().query(periods, built.query, {
+          name: 'multidevice',
+          verbose: true,
+        });
+        const activity = { ...(data[0].activity ?? {}) };
+        activity.app_events = remapNamespacedAppTitle(
+          activity.app_events,
+          built.materialized.appTitleSourceId
+        );
+        activity.title_events = remapNamespacedAppTitle(
+          activity.title_events,
+          built.materialized.appTitleSourceId
+        );
+        this.query_activity_completed(activity);
+        this.query_browser_completed(data[0].browser);
+        if (include_stopwatch) {
+          this.query_stopwatch_completed(data[0].stopwatch);
+        }
+        return;
+      }
+
+      // Old-server / custom-UI compatibility: legacy multidevice query.
+      const host_params = this.multideviceHostParams(hosts, true);
       const q = queries.multideviceQuery({
         hosts,
         filter_afk,
@@ -362,12 +451,30 @@ export const useActivityStore = defineStore('activity', {
         ...useSettingsStore().compiledRulesV2,
       });
       const data = await getClient().query(periods, q, { name: 'multidevice', verbose: true });
-      this.query_window_completed(data[0].window);
+      this.query_activity_completed(data[0].window);
     },
 
     eligibleMultideviceHosts(queryOptions: QueryOptions): string[] {
       const bucketsStore = useBucketsStore();
       const settingsStore = useSettingsStore();
+      const compiledV2 = settingsStore.compiledActivityQueryV2;
+      if (compiledV2) {
+        // v2 availability inspects only materialized coverage/active-time sources.
+        const needsActiveTime = queryNeedsResolvedActiveTime(queryOptions.filter_afk, false);
+        return bucketsStore.hosts.filter(
+          host =>
+            host &&
+            hostHasResolvedActivityV2(host, bucketsStore.buckets, compiledV2, {
+              includeStopwatch: queryOptions.include_stopwatch,
+            }) &&
+            (!needsActiveTime ||
+              hostHasResolvedActiveTimeV2(host, bucketsStore.buckets, compiledV2, {
+                includeAudible: queryOptions.include_audible,
+                browserBucketIds: bucketsStore.bucketsBrowser(host),
+              })) &&
+            (!host.startsWith('fakedata') || queryOptions.host.startsWith('fakedata'))
+        );
+      }
       const needsActiveTime = queryNeedsResolvedActiveTime(
         queryOptions.filter_afk,
         (settingsStore.compiledRulesV2?.background_sources.length ?? 0) > 0
@@ -411,6 +518,40 @@ export const useActivityStore = defineStore('activity', {
       const periods = [timeperiodToStr(timeperiod)];
       const categories = useCategoryStore().classes_for_query;
 
+      // Capable servers: build a source-only v2 query (no bid_window/bid_afk/
+      // always_active_pattern/bid_stopwatch). App/title summaries are a
+      // presentation projection from the configured source, remapped from the
+      // flat `$source.<id>.app/title` keys at this store boundary.
+      const v2Input = hostActivityInputV2(host, {
+        filter_afk,
+        filter_categories,
+        include_stopwatch,
+        include_audible,
+      });
+      const built = v2Input ? buildFullActivityQueryV2(v2Input) : null;
+      if (built) {
+        const data = await getClient().query(periods, built.query, {
+          name: 'fullActivityQueryV2',
+          verbose: true,
+        });
+        const activity = { ...(data[0].activity ?? {}) };
+        activity.app_events = remapNamespacedAppTitle(
+          activity.app_events,
+          built.materialized.appTitleSourceId
+        );
+        activity.title_events = remapNamespacedAppTitle(
+          activity.title_events,
+          built.materialized.appTitleSourceId
+        );
+        this.query_activity_completed(activity);
+        this.query_browser_completed(data[0].browser);
+        if (include_stopwatch) {
+          this.query_stopwatch_completed(data[0].stopwatch);
+        }
+        return;
+      }
+
+      // Old-server / custom-UI compatibility: legacy full desktop query.
       const q = queries.fullDesktopQuery({
         hostname: host,
         bid_window: this.buckets.window[0],
@@ -431,7 +572,7 @@ export const useActivityStore = defineStore('activity', {
         name: 'fullDesktopQuery',
         verbose: true,
       });
-      this.query_window_completed(data[0].window);
+      this.query_activity_completed(data[0].window);
       this.query_browser_completed(data[0].browser);
       if (include_stopwatch) {
         this.query_stopwatch_completed(data[0].stopwatch);
@@ -448,7 +589,7 @@ export const useActivityStore = defineStore('activity', {
       this.query_editor_completed(data[0]);
     },
 
-    async query_active_history({ timeperiod, host }: QueryOptions) {
+    async query_active_history({ timeperiod, host, include_audible }: QueryOptions) {
       const settingsStore = useSettingsStore();
       const bucketsStore = useBucketsStore();
       // Filter out periods that are already in the history, and that are in the future
@@ -457,6 +598,67 @@ export const useActivityStore = defineStore('activity', {
           !_.includes(this.active.history, tp_str) && new Date(tp_str.split('/')[0]) < new Date()
         );
       });
+      const compiledV2 = settingsStore.compiledActivityQueryV2;
+
+      // Capable servers: build per-host source-only v2 queries (no bid_window/
+      // bid_afk/always_active_pattern) and union the resulting active periods.
+      if (compiledV2) {
+        let activeHosts: string[];
+        if (settingsStore.useMultidevice) {
+          activeHosts = bucketsStore.hosts.filter(
+            candidateHost =>
+              candidateHost &&
+              candidateHost !== 'unknown' &&
+              hostHasResolvedActiveTimeV2(candidateHost, bucketsStore.buckets, compiledV2, {
+                includeAudible: include_audible,
+                browserBucketIds: bucketsStore.bucketsBrowser(candidateHost),
+              }) &&
+              hostHasResolvedActivityV2(candidateHost, bucketsStore.buckets, compiledV2) &&
+              (!candidateHost.startsWith('fakedata') || host.startsWith('fakedata'))
+          );
+        } else {
+          activeHosts =
+            hostHasResolvedActiveTimeV2(host, bucketsStore.buckets, compiledV2, {
+              includeAudible: include_audible,
+              browserBucketIds: bucketsStore.bucketsBrowser(host),
+            }) && hostHasResolvedActivityV2(host, bucketsStore.buckets, compiledV2)
+              ? [host]
+              : [];
+        }
+        const hostQueries = activeHosts.map((activeHost, index) => {
+          const suffix = `active_host_${index}`;
+          const input = hostActivityInputV2(activeHost, {
+            filter_afk: false,
+            filter_categories: null,
+            include_audible,
+            category_specs: null,
+            return_variable_suffix: suffix,
+          });
+          const materialized = input ? materializeHostActivityV2(input) : null;
+          return (
+            resolveActivityProfileV2(materialized.params) +
+            `\nactive_${suffix} = filter_period_intersect(events_${suffix}, not_afk_${suffix});`
+          );
+        });
+        const union = activeHosts
+          .map(
+            (_activeHost, index) =>
+              `active_events = union_no_overlap(active_events, active_active_host_${index});`
+          )
+          .join('\n');
+        const query = queryStringToArray(
+          `${hostQueries.join('\n')}\nactive_events = [];\n${union}\nRETURN = active_events;`
+        );
+        const data = await getClient().query(periods, query, {
+          name: 'activityQuery',
+          verbose: true,
+        });
+        const active_history = _.zipObject(periods, data);
+        this.query_active_history_completed({ active_history });
+        return;
+      }
+
+      // Old-server / custom-UI compatibility: legacy resolveActivityProfile path.
       let activeHosts: string[] = [];
       const advanced = settingsStore.compiledRulesV2;
       if (settingsStore.useMultidevice) {
@@ -598,6 +800,7 @@ export const useActivityStore = defineStore('activity', {
         const categories = useCategoryStore().classes_for_query;
         const settingsStore = useSettingsStore();
         const advanced = settingsStore.compiledRulesV2;
+        const compiledV2 = settingsStore.compiledActivityQueryV2;
         const multideviceHosts =
           settingsStore.useMultidevice && !isAndroid
             ? this.eligibleMultideviceHosts({
@@ -606,47 +809,84 @@ export const useActivityStore = defineStore('activity', {
                 host,
               })
             : [];
-        // TODO: Clean up call, pass QueryParams in fullDesktopQuery as well
-        // TODO: Unify QueryOptions and QueryParams
-        const query = queries.categoryQuery({
-          bid_browsers: this.buckets.browser,
-          bid_stopwatch:
-            include_stopwatch && this.buckets.stopwatch.length > 0
-              ? this.buckets.stopwatch[0]
-              : undefined,
-          categories,
-          filter_categories,
-          filter_afk,
-          include_audible,
-          always_active_pattern,
-          ...(multideviceHosts.length > 0
-            ? {
-                hosts: multideviceHosts,
-                host_params: this.multideviceHostParams(
-                  multideviceHosts,
-                  include_stopwatch ?? false
-                ),
-                ...advanced,
-              }
-            : isAndroid
-            ? {
-                hostname: host,
-                bid_android: this.buckets.android[0],
-                ...(advanced
-                  ? {
-                      category_specs: advanced.category_specs,
-                      context_sources: advanced.context_sources,
-                      capabilities: advanced.capabilities,
-                    }
-                  : {}),
-              }
-            : {
-                hostname: host,
-                bid_afk: this.buckets.afk[0],
-                bid_window: this.buckets.window[0],
-                ...advanced,
-              }),
-        });
+
+        // Capable servers (non-Android): source-only v2 category query, never
+        // injecting bid_window / bid_afk / bid_stopwatch / always_active_pattern.
+        let query: string[] | undefined;
+        if (compiledV2 && !isAndroid) {
+          if (multideviceHosts.length > 0) {
+            const perHostParams = multideviceHosts
+              .map(mdHost =>
+                hostActivityInputV2(mdHost, {
+                  filter_afk,
+                  filter_categories,
+                  include_stopwatch,
+                  include_audible,
+                })
+              )
+              .filter((input): input is HostActivityInput => input !== undefined)
+              .map(input => materializeHostActivityV2(input))
+              .filter(m => m !== null)
+              .map(m => m.params);
+            query = queries.categoryActivityMultiQueryV2(perHostParams);
+          } else {
+            const input = hostActivityInputV2(host, {
+              filter_afk,
+              filter_categories,
+              include_stopwatch,
+              include_audible,
+            });
+            const materialized = input ? materializeHostActivityV2(input) : null;
+            if (materialized) {
+              query = queries.categoryActivityQueryV2(materialized.params);
+            }
+          }
+        }
+
+        // Old-server / custom-UI compatibility (or Android): legacy categoryQuery.
+        if (!query) {
+          // TODO: Clean up call, pass QueryParams in fullDesktopQuery as well
+          // TODO: Unify QueryOptions and QueryParams
+          query = queries.categoryQuery({
+            bid_browsers: this.buckets.browser,
+            bid_stopwatch:
+              include_stopwatch && this.buckets.stopwatch.length > 0
+                ? this.buckets.stopwatch[0]
+                : undefined,
+            categories,
+            filter_categories,
+            filter_afk,
+            include_audible,
+            always_active_pattern,
+            ...(multideviceHosts.length > 0
+              ? {
+                  hosts: multideviceHosts,
+                  host_params: this.multideviceHostParams(
+                    multideviceHosts,
+                    include_stopwatch ?? false
+                  ),
+                  ...advanced,
+                }
+              : isAndroid
+              ? {
+                  hostname: host,
+                  bid_android: this.buckets.android[0],
+                  ...(advanced
+                    ? {
+                        category_specs: advanced.category_specs,
+                        context_sources: advanced.context_sources,
+                        capabilities: advanced.capabilities,
+                      }
+                    : {}),
+                }
+              : {
+                  hostname: host,
+                  bid_afk: this.buckets.afk[0],
+                  bid_window: this.buckets.window[0],
+                  ...advanced,
+                }),
+          });
+        }
         const result = await getClient().query([period], query, {
           verbose: true,
           name: 'categoryQuery',
@@ -683,23 +923,59 @@ export const useActivityStore = defineStore('activity', {
     set_available(this: State) {
       const currentHost = this.query_options?.host ?? '';
       const bucketsStore = useBucketsStore();
-      const compiled = useSettingsStore().compiledRulesV2;
-      const activityAvailable = hostHasResolvedActivity(
-        currentHost,
-        bucketsStore.buckets,
-        compiled
-      );
-      const activeTimeAvailable = hostHasResolvedActiveTime(
-        currentHost,
-        bucketsStore.buckets,
-        compiled
-      );
-      const needsActiveTime = queryNeedsResolvedActiveTime(
-        this.query_options?.filter_afk,
-        (compiled?.background_sources.length ?? 0) > 0
-      );
-      this.window.available = activityAvailable && (!needsActiveTime || activeTimeAvailable);
-      this.browser.available = this.window.available && this.buckets.browser.length > 0;
+      const settingsStore = useSettingsStore();
+      const compiledV2 = settingsStore.compiledActivityQueryV2;
+
+      let activityAvailable: boolean;
+      let activeTimeAvailable: boolean;
+      let needsActiveTime: boolean;
+      if (compiledV2) {
+        // Capable servers: availability inspects only the materialized coverage
+        // and active-time sources, never the currentwindow bucket type directly.
+        activityAvailable = hostHasResolvedActivityV2(
+          currentHost,
+          bucketsStore.buckets,
+          compiledV2,
+          { includeStopwatch: this.query_options?.include_stopwatch }
+        );
+        activeTimeAvailable = hostHasResolvedActiveTimeV2(
+          currentHost,
+          bucketsStore.buckets,
+          compiledV2,
+          {
+            includeAudible: this.query_options?.include_audible,
+            browserBucketIds: bucketsStore.bucketsBrowser(currentHost),
+          }
+        );
+        needsActiveTime = queryNeedsResolvedActiveTime(this.query_options?.filter_afk, false);
+      } else {
+        const compiled = settingsStore.compiledRulesV2;
+        activityAvailable = hostHasResolvedActivity(currentHost, bucketsStore.buckets, compiled);
+        activeTimeAvailable = hostHasResolvedActiveTime(
+          currentHost,
+          bucketsStore.buckets,
+          compiled
+        );
+        needsActiveTime = queryNeedsResolvedActiveTime(
+          this.query_options?.filter_afk,
+          (compiled?.background_sources.length ?? 0) > 0
+        );
+      }
+
+      this.activity.available = activityAvailable && (!needsActiveTime || activeTimeAvailable);
+      // Browser availability is independent of window/activity availability: it
+      // depends only on the presence of browser buckets.
+      const v2Materialized = compiledV2
+        ? materializeHostActivityV2({
+            host: currentHost,
+            buckets: bucketsStore.buckets,
+            compiledV2,
+            browser_bucket_ids: this.buckets.browser,
+          })
+        : null;
+      this.browser.available =
+        this.buckets.browser.length > 0 &&
+        (!compiledV2 || v2Materialized?.browserFocusSourceId !== undefined);
       this.active.available = activeTimeAvailable;
       this.editor.available = this.buckets.editor.length > 0;
       this.android.available = this.buckets.android.length > 0;
@@ -752,7 +1028,7 @@ export const useActivityStore = defineStore('activity', {
         (e: any) => e.data.title
       );
 
-      this.query_window_completed({
+      this.query_activity_completed({
         duration: _.sumBy(window_events, 'duration'),
         app_events,
         title_events,
@@ -813,8 +1089,8 @@ export const useActivityStore = defineStore('activity', {
       this.query_options = query_options;
 
       // Resets the store state while waiting for new query to finish
-      this.window.top_apps = null;
-      this.window.top_titles = null;
+      this.activity.top_apps = null;
+      this.activity.top_titles = null;
 
       this.browser.duration = 0;
       this.browser.top_domains = null;
@@ -839,7 +1115,7 @@ export const useActivityStore = defineStore('activity', {
       }
     },
 
-    query_window_completed(
+    query_activity_completed(
       this: State,
       data = { app_events: [], title_events: [], cat_events: [], active_events: [], duration: 0 }
     ) {
@@ -849,8 +1125,8 @@ export const useActivityStore = defineStore('activity', {
         data.cat_events = scoreCategories(data.cat_events);
       }
 
-      this.window.top_apps = data.app_events;
-      this.window.top_titles = data.title_events;
+      this.activity.top_apps = data.app_events;
+      this.activity.top_titles = data.title_events;
       this.category.top = data.cat_events;
       this.active.duration = data.duration;
       this.active.events = data.active_events;

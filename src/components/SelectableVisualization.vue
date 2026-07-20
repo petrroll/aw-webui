@@ -24,12 +24,12 @@ div
         | You can find a list of all watchers in #[a(href="https://docs.activitywatch.net/en/latest/watchers.html") the documentation].
 
     div(v-if="type == 'top_apps'")
-      aw-summary(:fields="activityStore.window.top_apps",
+      aw-summary(:fields="activityStore.activity.top_apps",
                  :namefunc="e => e.data.app",
                  :colorfunc="e => e.data.app",
                  with_limit)
     div(v-if="type == 'top_titles' && !activityStore.android.available")
-      aw-summary(:fields="activityStore.window.top_titles",
+      aw-summary(:fields="activityStore.activity.top_titles",
                  :namefunc="e => e.data.title",
                  :colorfunc="e => e.data['$category']",
                  with_limit)
@@ -195,11 +195,11 @@ export default {
       return {
         top_apps: {
           title: 'Top Applications',
-          available: this.activityStore.window.available || this.activityStore.android.available,
+          available: this.activityStore.activity.available || this.activityStore.android.available,
         },
         top_titles: {
-          title: 'Top Window Titles',
-          available: this.activityStore.window.available,
+          title: 'Top Titles',
+          available: this.activityStore.activity.available,
         },
         top_domains: {
           title: 'Top Browser Domains',
@@ -243,7 +243,7 @@ export default {
         },
         sunburst_clock: {
           title: 'Sunburst clock',
-          available: this.activityStore.window.available && this.activityStore.active.available,
+          available: this.activityStore.activity.available && this.activityStore.active.available,
         },
         vis_timeline: {
           title: 'Daily Timeline (Chronological)',

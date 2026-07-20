@@ -98,7 +98,9 @@ import {
   getWorkReportHostOptions,
   getUnsupportedWorkReportHosts,
   buildWorkReportQuery,
+  buildWorkReportQueryV2,
 } from '~/util/workReport';
+import { materializeHostsV2 } from '~/util/activityQuery';
 
 import 'vue-awesome/icons/sync';
 import 'vue-awesome/icons/download';
@@ -156,9 +158,12 @@ export default {
   },
   computed: {
     hostOptions() {
+      const activeTime = this.settingsStore.rulesV2.activity_profiles_v2[0]?.active_time;
       return getWorkReportHostOptions(
         this.bucketsStore.buckets || [],
-        this.settingsStore.compiledRulesV2
+        this.settingsStore.compiledRulesV2,
+        this.settingsStore.compiledActivityQueryV2,
+        activeTime?.type === 'legacy' ? activeTime.include_audible : undefined
       );
     },
 
@@ -236,13 +241,21 @@ export default {
         const unsupportedHosts = getUnsupportedWorkReportHosts(
           this.selectedHosts,
           this.bucketsStore.buckets || [],
-          this.settingsStore.compiledRulesV2
+          this.settingsStore.compiledRulesV2,
+          this.settingsStore.compiledActivityQueryV2,
+          this.settingsStore.rulesV2.activity_profiles_v2[0]?.active_time.type === 'legacy'
+            ? this.settingsStore.rulesV2.activity_profiles_v2[0].active_time.include_audible
+            : undefined
         );
         if (unsupportedHosts.length > 0) {
           const supportedHosts = getSupportedWorkReportHosts(
             this.selectedHosts,
             this.bucketsStore.buckets || [],
-            this.settingsStore.compiledRulesV2
+            this.settingsStore.compiledRulesV2,
+            this.settingsStore.compiledActivityQueryV2,
+            this.settingsStore.rulesV2.activity_profiles_v2[0]?.active_time.type === 'legacy'
+              ? this.settingsStore.rulesV2.activity_profiles_v2[0].active_time.include_audible
+              : undefined
           );
           if (supportedHosts.length === 0) {
             this.loadError = String(
@@ -264,7 +277,11 @@ export default {
         const hostsToQuery = getSupportedWorkReportHosts(
           this.selectedHosts,
           this.bucketsStore.buckets || [],
-          this.settingsStore.compiledRulesV2
+          this.settingsStore.compiledRulesV2,
+          this.settingsStore.compiledActivityQueryV2,
+          this.settingsStore.rulesV2.activity_profiles_v2[0]?.active_time.type === 'legacy'
+            ? this.settingsStore.rulesV2.activity_profiles_v2[0].active_time.include_audible
+            : undefined
         );
         const timeperiods = this.getTimeperiods();
         const breakTimeSeconds = this.breakTime * 60;
@@ -300,29 +317,43 @@ export default {
 
         const categories = this.categoryStore.classes_for_query;
         const activeTime = this.settingsStore.rulesV2.activity_profiles_v2[0]?.active_time;
-        const hostParams = Object.fromEntries(
-          hostsToQuery.map(host => [
-            host,
+
+        // Capable servers: source-only v2 work report (no bid_window / bid_afk /
+        // always_active_pattern). Old-server/custom setups use legacy path.
+        const perHostV2 = materializeHostsV2(hostsToQuery, {
+          filter_afk: true,
+          filter_categories: categoriesFilter,
+          include_audible: activeTime?.type === 'legacy' ? activeTime.include_audible : undefined,
+        });
+        let query: string;
+        if (perHostV2) {
+          query = buildWorkReportQueryV2(perHostV2, categoriesFilter);
+        } else {
+          const hostParams = Object.fromEntries(
+            hostsToQuery.map(host => [
+              host,
+              {
+                bid_window: this.bucketsStore.bucketsWindow(host)[0],
+                bid_afk: this.bucketsStore.bucketsAFK(host)[0],
+                bid_browsers: this.bucketsStore.bucketsBrowser(host),
+              },
+            ])
+          );
+          query = buildWorkReportQuery(
             {
-              bid_window: this.bucketsStore.bucketsWindow(host)[0],
-              bid_afk: this.bucketsStore.bucketsAFK(host)[0],
-              bid_browsers: this.bucketsStore.bucketsBrowser(host),
+              hosts: hostsToQuery,
+              host_params: hostParams,
+              filter_afk: true,
+              categories,
+              filter_categories: categoriesFilter,
+              always_active_pattern: this.settingsStore.always_active_pattern,
+              include_audible:
+                activeTime?.type === 'legacy' ? activeTime.include_audible : undefined,
+              ...this.settingsStore.compiledRulesV2,
             },
-          ])
-        );
-        const query = buildWorkReportQuery(
-          {
-            hosts: hostsToQuery,
-            host_params: hostParams,
-            filter_afk: true,
-            categories,
-            filter_categories: categoriesFilter,
-            always_active_pattern: this.settingsStore.always_active_pattern,
-            include_audible: activeTime?.type === 'legacy' ? activeTime.include_audible : undefined,
-            ...this.settingsStore.compiledRulesV2,
-          },
-          categoriesFilter
-        );
+            categoriesFilter
+          );
+        }
 
         const results = await client.query(timeperiods, [query]);
 

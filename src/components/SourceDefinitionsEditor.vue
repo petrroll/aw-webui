@@ -7,13 +7,10 @@ div
       b-col
         b-form-group(:label="$t('settings.categorization.sourceLabel')")
           b-form-input(
-            v-if="!source.builtin"
             size="sm"
             :value="source.label"
             @input="update(index, 'label', $event)"
           )
-          div.form-control-plaintext.py-1(v-else)
-            strong {{ $t('settings.categorization.builtinWindowSourceLabel') }}
           small.text-muted(v-if="source.builtin === 'window'")
             | {{ $t('settings.categorization.builtinWindowSourceHelp') }}
       b-col
@@ -29,17 +26,19 @@ div
           small.text-muted.d-block {{ $t('settings.categorization.sourceCreatesActivityHelp') }}
           small.text-warning.d-block(v-if="!supportsActivityCoverage")
             | {{ $t('settings.categorization.activityCoverageUnavailable') }}
-    small.text-muted.d-block.mb-2(v-if="!source.builtin")
+    small.text-muted.d-block.mb-2
       | {{ $t('settings.categorization.sourceInternalId') }}:
       code.ml-1 {{ source.id }}
-    b-form-group(v-if="!source.builtin" :label="$t('settings.categorization.sourceBucketIds')")
+    b-form-group(:label="$t('settings.categorization.sourceBucketIds')")
       b-form-input(
         size="sm"
         :value="source.bucket_ids.join(', ')"
         :state="sourceFieldState(index, 'bucket_ids')"
         @input="updateList(index, 'bucket_ids', $event)"
       )
-      small.text-muted {{ $t('settings.categorization.sourceBucketIdsHelp') }}
+      small.text-muted(v-if="source.builtin === 'window'")
+        | {{ $t('settings.categorization.builtinWindowBucketsHelp') }}
+      small.text-muted(v-else) {{ $t('settings.categorization.sourceBucketIdsHelp') }}
       b-form-invalid-feedback
         | {{ $t('settings.categorization.sourceBucketRequired') }}
       small.text-muted.d-block(
@@ -47,9 +46,15 @@ div
         :key="bucket.id"
       )
         | {{ $t('settings.categorization.sourceBucketOwner', { bucket: bucket.id, host: bucket.hostname || $t('settings.categorization.sourceDeviceUnknown') }) }}
+      small.text-muted.d-block(
+        v-if="source.builtin === 'window' && source.bucket_ids.length === 0"
+        v-for="bucket in discoveredWindowBuckets"
+        :key="'discovered-' + bucket.id"
+      )
+        | {{ $t('settings.categorization.builtinWindowDiscoveredBucket', { bucket: bucket.id, host: bucket.hostname || $t('settings.categorization.sourceDeviceUnknown') }) }}
       small.text-warning.d-block(v-if="unavailableBucketIds(source).length")
         | {{ $t('settings.categorization.sourceBucketsUnavailable', { buckets: unavailableBucketIds(source).join(', ') }) }}
-    b-form-group(v-if="!source.builtin" :label="$t('settings.categorization.sourceScope')")
+    b-form-group(:label="$t('settings.categorization.sourceScope')")
       b-form-select(
         size="sm"
         :value="source.scope || 'host'"
@@ -75,7 +80,7 @@ div
         | {{ $t('settings.categorization.sourceFieldsHelp', { source: source.id }) }}
       b-form-invalid-feedback
         | {{ $t('settings.categorization.validationSourceFieldsRequired', { source: source.label || source.id }) }}
-    b-btn(v-if="!source.builtin" size="sm" variant="outline-danger" @click="remove(index)")
+    b-btn(size="sm" variant="outline-danger" @click="remove(index)")
       | {{ $t('settings.categorization.removeSource') }}
   b-btn(size="sm" variant="outline-primary" @click="add")
     | {{ $t('settings.categorization.addSource') }}
@@ -109,6 +114,11 @@ export default {
     },
     hasActivityCreator() {
       return (this.value as SourceDefinitionV2[]).some(source => source.creates_activity);
+    },
+    discoveredWindowBuckets() {
+      return this.bucketsStore.buckets.filter(
+        bucket => bucket.type === 'currentwindow' && !bucket.id.startsWith('aw-watcher-android')
+      );
     },
   },
   methods: {

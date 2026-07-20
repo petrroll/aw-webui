@@ -49,7 +49,8 @@ div
 
 <script lang="ts">
 import moment from 'moment';
-import { queryStringToArray, resolveActivityProfile, RULE_ENGINE_CAPABILITIES } from '~/queries';
+import { RULE_ENGINE_CAPABILITIES } from '~/queries';
+import { resolveActivityEventsQuery, remapNamespacedAppTitle } from '~/util/activityQuery';
 import { useBucketsStore } from '~/stores/buckets';
 import { useCategoryStore } from '~/stores/categories';
 import { useSettingsStore } from '~/stores/settings';
@@ -108,8 +109,15 @@ export default {
       this.error = '';
       try {
         const activeTime = this.settingsStore.rulesV2.activity_profiles_v2[0]?.active_time;
-        const query =
-          resolveActivityProfile({
+        const { query, materialized } = resolveActivityEventsQuery({
+          host: this.queryOptions.hostname,
+          v2: {
+            filter_afk: this.queryOptions.filter_afk,
+            filter_categories: null,
+            include_audible: activeTime?.type === 'legacy' ? activeTime.include_audible : false,
+            explain_categories: true,
+          },
+          legacyParams: {
             hostname: this.queryOptions.hostname,
             bid_window: this.bucketsStore.bucketsWindow(this.queryOptions.hostname)[0],
             bid_afk: this.bucketsStore.bucketsAFK(this.queryOptions.hostname)[0],
@@ -121,13 +129,17 @@ export default {
             filter_categories: null,
             ...advanced,
             explain_categories: true,
-          }) + '\nRETURN = limit_events(sort_by_duration(events), 100);';
+          },
+          returnStatement: 'RETURN = limit_events(sort_by_duration(events), 100);',
+        });
         const result = await getClient().query(
           [get_inclusive_local_date_range(this.queryOptions.start, this.queryOptions.stop)],
-          queryStringToArray(query),
+          query,
           { name: 'rulesPreview', verbose: true }
         );
-        this.events = result[0] ?? [];
+        this.events = materialized
+          ? remapNamespacedAppTitle(result[0] ?? [], materialized.appTitleSourceId)
+          : result[0] ?? [];
       } catch (error) {
         this.error = error instanceof Error ? error.message : String(error);
       } finally {

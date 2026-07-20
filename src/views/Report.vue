@@ -85,7 +85,8 @@ import 'vue-awesome/icons/spinner';
 import 'vue-awesome/icons/angle-double-down';
 import 'vue-awesome/icons/angle-double-up';
 
-import { queryStringToArray, resolveActivityProfile } from '~/queries';
+import { resolveActivityEventsQuery } from '~/util/activityQuery';
+import { BUILTIN_WINDOW_SOURCE_ID } from '~/util/rulesV2';
 import { buildBarchartDataset } from '~/util/datasets';
 
 import { useActivityStore } from '~/stores/activity';
@@ -160,42 +161,69 @@ export default {
           host: source.host,
         }));
       const searchableSourceIds = searchableSources.map(source => source.id);
-      let query = resolveActivityProfile({
-        hostname: this.queryOptions.hostname,
-        bid_window: this.bucketsStore.bucketsWindow(this.queryOptions.hostname)[0],
-        bid_afk: this.bucketsStore.bucketsAFK(this.queryOptions.hostname)[0],
-        filter_afk: this.queryOptions.filter_afk,
-        categories: this.filterCategories,
-        filter_categories: this.filterCategories.map(c => c[0]),
-        ...(compiled ?? {}),
-        ...(customRule && compiled
-          ? {
-              context_sources: reportContextSources,
-              category_specs: [
-                {
-                  id: 'report-search',
-                  name: ['searched'],
-                  rule:
-                    searchableSourceIds.length > 0
-                      ? {
-                          type: 'any',
-                          rules: [
-                            customRegex,
-                            ...searchableSourceIds.map(source => ({
-                              ...customRegex,
-                              source,
-                            })),
-                          ],
-                        }
-                      : customRegex,
-                },
-              ],
-            }
-          : {}),
+      const v2SearchRule = customRule
+        ? {
+            type: 'any' as const,
+            rules: [
+              {
+                type: 'regex' as const,
+                source: BUILTIN_WINDOW_SOURCE_ID,
+                regex: customRule[1].regex,
+                ignore_case: customRule[1].ignore_case,
+              },
+              ...searchableSourceIds.map(source => ({
+                type: 'regex' as const,
+                source,
+                regex: customRule[1].regex,
+                ignore_case: customRule[1].ignore_case,
+              })),
+            ],
+          }
+        : undefined;
+      const { query: query_array } = resolveActivityEventsQuery({
+        host: this.queryOptions.hostname,
+        v2: {
+          filter_afk: this.queryOptions.filter_afk,
+          filter_categories: this.filterCategories.map(c => c[0]),
+          category_specs: v2SearchRule
+            ? [{ id: 'report-search', name: ['searched'], rule: v2SearchRule }]
+            : undefined,
+          extra_context_sources: customRule ? reportContextSources : undefined,
+        },
+        legacyParams: {
+          hostname: this.queryOptions.hostname,
+          bid_window: this.bucketsStore.bucketsWindow(this.queryOptions.hostname)[0],
+          bid_afk: this.bucketsStore.bucketsAFK(this.queryOptions.hostname)[0],
+          filter_afk: this.queryOptions.filter_afk,
+          categories: this.filterCategories,
+          filter_categories: this.filterCategories.map(c => c[0]),
+          ...(compiled ?? {}),
+          ...(customRule && compiled
+            ? {
+                context_sources: reportContextSources,
+                category_specs: [
+                  {
+                    id: 'report-search',
+                    name: ['searched'],
+                    rule:
+                      searchableSourceIds.length > 0
+                        ? {
+                            type: 'any',
+                            rules: [
+                              customRegex,
+                              ...searchableSourceIds.map(source => ({
+                                ...customRegex,
+                                source,
+                              })),
+                            ],
+                          }
+                        : customRegex,
+                  },
+                ],
+              }
+            : {}),
+        },
       });
-      query += '; RETURN = events;';
-
-      const query_array = queryStringToArray(query);
       const start = moment(this.queryOptions.start).format();
       const end = moment(this.queryOptions.stop).format();
       const timeperiods = [start + '/' + end];

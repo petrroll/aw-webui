@@ -245,7 +245,10 @@ export default {
       sourceLabel: '名称',
       builtinWindowSourceLabel: '应用与窗口',
       builtinWindowSourceHelp:
-        '内置数据源。ActivityWatch 会为每台设备分别解析。AFK 在“活跃时间”中配置；其他 watcher 会在规则需要时添加。',
+        '默认的“应用与窗口”数据源。ActivityWatch 会自动解析每台设备的窗口 bucket。在高级模式下，可像其他数据源一样重命名、重新指向或移除它；AFK 在“活跃时间”中配置。',
+      builtinWindowBucketsHelp:
+        '留空以自动发现每台设备的窗口 bucket，或填写精确的 bucket ID 以覆盖。',
+      builtinWindowDiscoveredBucket: '自动发现：{bucket} — 设备：{host}',
       builtinWindowFieldsHelp: '选择“应用与窗口”规则可使用的字段。默认字段为 app 和 title。',
       noActivityCreatingSourceWarning:
         '当前没有数据源可以创建活动时段。至少启用一个数据源后，分类规则才有时间可供分类。',
@@ -314,8 +317,8 @@ export default {
       automaticSourceHelp:
         '匹配当前活动应用的名称和窗口标题。若要匹配浏览器 URL 或虚拟桌面等其他数据，请在上方选择相应的监视器。',
       savedSources: '自定义数据源',
-      savedWatcherSelections: '当前不可用的监视器数据',
-      availableWatcherData: '监视器数据',
+      savedWatcherSelections: '已保存的监视器数据（当前不可用）',
+      availableWatcherData: '可用的监视器数据',
       allDevices: '所有设备',
       sourceAvailableOn: '可用于 {hosts}',
       sourceDeviceUnknown: '未报告设备',

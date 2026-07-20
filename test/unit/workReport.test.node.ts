@@ -182,4 +182,101 @@ describe('workReport host helpers', () => {
     expect(query).not.toContain('aw-watcher-window');
     expect(query).not.toContain('aw-watcher-afk');
   });
+
+  test('uses v2 host eligibility when a source-only profile is available', () => {
+    const genericBuckets = [
+      {
+        id: 'custom-activity',
+        hostname: 'custom',
+        device_id: 'custom',
+        type: 'custom.activity',
+        data: {},
+      },
+      {
+        id: 'custom-active',
+        hostname: 'custom',
+        device_id: 'custom',
+        type: 'custom.active',
+        data: {},
+      },
+    ];
+    const compiledV2 = {
+      category_specs: [],
+      context_sources: [],
+      activity_coverage_sources: [
+        {
+          source_id: 'activity',
+          bucket_ids: ['custom-activity'],
+          scope: 'host' as const,
+          bucket_hosts: { 'custom-activity': 'custom' },
+          fields: ['state'],
+        },
+      ],
+      active_time_rule: {
+        type: 'regex' as const,
+        source: 'active',
+        field: 'state',
+        regex: 'yes',
+      },
+      active_time_sources: [
+        {
+          source_id: 'active',
+          bucket_ids: ['custom-active'],
+          scope: 'host' as const,
+          bucket_hosts: { 'custom-active': 'custom' },
+        },
+      ],
+      capabilities: [],
+    };
+
+    expect(getWorkReportHostOptions(genericBuckets as any, undefined, compiledV2)).toEqual([
+      { value: 'custom', text: 'custom', disabled: false },
+    ]);
+    expect(
+      getSupportedWorkReportHosts(['custom'], genericBuckets as any, undefined, compiledV2)
+    ).toEqual(['custom']);
+  });
+
+  test('v2 audible eligibility uses an unknown-host browser fallback', () => {
+    const fallbackBuckets = [
+      {
+        id: 'custom-activity',
+        hostname: 'custom',
+        device_id: 'custom',
+        type: 'custom.activity',
+        data: {},
+      },
+      {
+        id: 'aw-watcher-web-chrome',
+        hostname: 'unknown',
+        device_id: 'unknown',
+        type: 'web.tab.current',
+        data: {},
+      },
+    ];
+    const compiledV2 = {
+      category_specs: [],
+      context_sources: [],
+      activity_coverage_sources: [
+        {
+          source_id: 'activity',
+          bucket_ids: ['custom-activity'],
+          scope: 'host' as const,
+          bucket_hosts: { 'custom-activity': 'custom' },
+          fields: ['state'],
+        },
+      ],
+      active_time_sources: [],
+      legacy_active_time: {
+        use_afk: false,
+        include_audible: true,
+        always_active_pattern: '',
+      },
+      capabilities: [],
+    };
+
+    expect(
+      getWorkReportHostOptions(fallbackBuckets as any, undefined, compiledV2, true)
+    ).toEqual([{ value: 'custom', text: 'custom', disabled: false }]);
+  });
 });

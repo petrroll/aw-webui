@@ -87,6 +87,9 @@ export default {
 
     if (_.isEmpty(this.$route.query.q)) {
       queryCode = `
+# Example: query raw watcher buckets directly.
+# This is only a starting example — it reads a raw window watcher bucket and is
+# not the canonical activity model. Adjust bucket IDs/fields for your own data.
 afk_events = query_bucket(find_bucket("aw-watcher-afk_"));
 window_events = query_bucket(find_bucket("aw-watcher-window_"));
 window_events = filter_period_intersect(window_events, filter_keyvals(afk_events, "status", ["not-afk"]));
