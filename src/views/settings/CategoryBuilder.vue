@@ -111,7 +111,6 @@ import { mapState } from 'pinia';
 
 import { useCategoryStore } from '~/stores/categories';
 import { useBucketsStore } from '~/stores/buckets';
-import { useSettingsStore } from '~/stores/settings';
 
 import { resolveActivityEventsQuery, remapNamespacedAppTitle } from '~/util/activityQuery';
 import { getClient } from '~/util/awclient';
@@ -230,21 +229,12 @@ export default {
       }
       await this.categoryStore.load();
       const awclient = getClient();
-      const bucketsStore = useBucketsStore();
       const { query, materialized } = resolveActivityEventsQuery({
         host: this.queryOptions.hostname,
+        filter_afk: this.queryOptions.filter_afk,
         v2: {
           filter_afk: this.queryOptions.filter_afk,
           filter_categories: [this.category],
-        },
-        legacyParams: {
-          hostname: this.queryOptions.hostname,
-          bid_window: bucketsStore.bucketsWindow(this.queryOptions.hostname)[0],
-          bid_afk: bucketsStore.bucketsAFK(this.queryOptions.hostname)[0],
-          filter_afk: this.queryOptions.filter_afk,
-          categories: this.categoryStore.classes_for_query,
-          filter_categories: [this.category],
-          ...useSettingsStore().compiledRulesV2,
         },
         returnStatement: 'RETURN = limit_events(sort_by_duration(events), 1000);',
       });

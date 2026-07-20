@@ -1,4 +1,5 @@
 import {
+  BUILTIN_WINDOW_SOURCE_ID,
   applyRulesSimplification,
   categorySetToLegacyClasses,
   compileProfileQueryOptions,
@@ -60,7 +61,11 @@ describe('rules v2 migration', () => {
       always_active_pattern: 'Teams',
     });
     expect(migrated.activity_profiles_v2[0].sources).toEqual(defaultBuiltinSources());
-    expect(migrated.activity_profiles_v2[0].source_defaults_version).toBe(2);
+    expect(migrated.activity_profiles_v2[0]).toMatchObject({
+      source_defaults_version: 3,
+      app_title_source_id: BUILTIN_WINDOW_SOURCE_ID,
+      browser_focus_source_id: BUILTIN_WINDOW_SOURCE_ID,
+    });
   });
 
   test('always migrates legacy classes into the stable default set', () => {
@@ -89,8 +94,10 @@ describe('rules v2 migration', () => {
     };
 
     expect(initializeProfileSourceDefaults([profile])[0]).toMatchObject({
-      source_defaults_version: 2,
+      source_defaults_version: 3,
       sources: defaultBuiltinSources(),
+      app_title_source_id: BUILTIN_WINDOW_SOURCE_ID,
+      browser_focus_source_id: BUILTIN_WINDOW_SOURCE_ID,
     });
     expect(
       initializeProfileSourceDefaults([
@@ -100,7 +107,7 @@ describe('rules v2 migration', () => {
         },
       ])[0]
     ).toMatchObject({
-      source_defaults_version: 2,
+      source_defaults_version: 3,
       sources: [
         defaultBuiltinWindowSource(false),
         defaultBuiltinBrowserSource(),
@@ -111,10 +118,33 @@ describe('rules v2 migration', () => {
       initializeProfileSourceDefaults([
         {
           ...profile,
-          source_defaults_version: 2,
+          source_defaults_version: 3,
         },
       ])[0].sources
     ).toEqual([]);
+  });
+
+  test('does not enable keeps_active on a disabled stopwatch source', () => {
+    const stopwatch = defaultBuiltinStopwatchSource();
+    delete stopwatch.creates_activity;
+    delete stopwatch.keeps_active;
+    const profile = {
+      schema_version: 2 as const,
+      source_defaults_version: 2,
+      id: 'default',
+      category_set_ids: ['default'],
+      sources: [stopwatch],
+      active_time: {
+        type: 'legacy' as const,
+        use_afk: true,
+        include_audible: true,
+        always_active_pattern: '',
+      },
+    };
+    const migrated = initializeProfileSourceDefaults([profile])[0];
+
+    expect(migrated.sources[0]).not.toHaveProperty('keeps_active');
+    expect(migrated.source_defaults_version).toBe(3);
   });
 
   test('preserves persisted sets when creating a default profile', () => {
@@ -779,6 +809,8 @@ describe('rules v2 validation', () => {
       const simpleProfile = {
         ...profile,
         sources: defaultBuiltinSources(),
+        app_title_source_id: BUILTIN_WINDOW_SOURCE_ID,
+        browser_focus_source_id: BUILTIN_WINDOW_SOURCE_ID,
         active_time: {
           type: 'legacy' as const,
           use_afk: true,

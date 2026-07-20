@@ -223,6 +223,8 @@ export const useSettingsStore = defineStore('settings', {
       }
       const usesNamespace =
         profile.sources.some(source => source.creates_activity || source.builtin === 'window') ||
+        !!profile.app_title_source_id ||
+        !!profile.browser_focus_source_id ||
         categorySet.categories.some(
           category => collectRuleSourceIds(category.rule).size > 0 || category.rule.type !== 'none'
         );
@@ -232,13 +234,17 @@ export const useSettingsStore = defineStore('settings', {
       ) {
         return undefined;
       }
-      if (
-        profile.active_time.type === 'expression' &&
-        !capabilities.includes('query.active_periods_v2.v1')
-      ) {
+      if (!capabilities.includes('query.active_periods_v2.v1')) {
         return undefined;
       }
       return compileActivityQueryV2(profile, rules.category_sets_v2, capabilities);
+    },
+    activityV2Unsupported(): boolean {
+      const rules = this.rulesV2;
+      if (!useServerStore().info || !rules.activity_profiles_v2[0] || !rules.category_sets_v2[0]) {
+        return false;
+      }
+      return !this.compiledActivityQueryV2;
     },
   },
 

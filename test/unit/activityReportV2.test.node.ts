@@ -43,7 +43,7 @@ function windowCoverageParams(): CanonicalQueryParamsV2 {
 describe('v2 report builders — generic activity, namespaced projection', () => {
   test('app/title summaries project from a namespaced source, never root fields', () => {
     const params = windowCoverageParams();
-    const appTitleSourceId = selectAppTitleSourceId(params);
+    const appTitleSourceId = selectAppTitleSourceId(params, BUILTIN_WINDOW_SOURCE_ID);
     expect(appTitleSourceId).toBe(BUILTIN_WINDOW_SOURCE_ID);
 
     const query = fullActivityQueryV2({
@@ -79,11 +79,11 @@ describe('v2 report builders — generic activity, namespaced projection', () =>
         },
       ],
     } as CanonicalQueryParamsV2;
-    expect(selectAppTitleSourceId(params)).toBeUndefined();
+    expect(selectAppTitleSourceId(params, BUILTIN_WINDOW_SOURCE_ID)).toBeUndefined();
 
     const query = fullActivityQueryV2({
       ...params,
-      app_title_source_id: selectAppTitleSourceId(params),
+      app_title_source_id: selectAppTitleSourceId(params, BUILTIN_WINDOW_SOURCE_ID),
     } as ActivityReportParamsV2).join('\n');
     expect(query).toContain('app_events = [];');
     expect(query).toContain('title_events = [];');
@@ -94,12 +94,12 @@ describe('v2 report builders — generic activity, namespaced projection', () =>
 
   test('browser focus filters on a namespaced source app key, never root app', () => {
     const params = windowCoverageParams();
-    const browserFocusSourceId = selectBrowserFocusSourceId(params);
+    const browserFocusSourceId = selectBrowserFocusSourceId(params, BUILTIN_WINDOW_SOURCE_ID);
     expect(browserFocusSourceId).toBe(BUILTIN_WINDOW_SOURCE_ID);
 
     const query = fullActivityQueryV2({
       ...params,
-      app_title_source_id: selectAppTitleSourceId(params),
+      app_title_source_id: selectAppTitleSourceId(params, BUILTIN_WINDOW_SOURCE_ID),
       browser_focus_source_id: browserFocusSourceId,
       browser_bucket_ids: ['aw-watcher-web-chrome_workstation'],
     } as ActivityReportParamsV2).join('\n');
@@ -133,8 +133,32 @@ describe('v2 report builders — generic activity, namespaced projection', () =>
       ],
     };
 
-    expect(selectAppTitleSourceId(params)).toBe('desktop_context');
-    expect(selectBrowserFocusSourceId(params)).toBe('desktop_context');
+    expect(selectAppTitleSourceId(params, 'desktop_context')).toBe('desktop_context');
+    expect(selectBrowserFocusSourceId(params, 'desktop_context')).toBe('desktop_context');
+  });
+
+  test('presentation uses only the explicitly configured source', () => {
+    const params: CanonicalQueryParamsV2 = {
+      hostname: 'workstation',
+      filter_categories: null,
+      capabilities,
+      category_specs: [],
+      activity_coverage_sources: [
+        {
+          source_id: 'first',
+          bucket_ids: ['first'],
+          fields: ['app', 'title'],
+        },
+        {
+          source_id: 'selected',
+          bucket_ids: ['selected'],
+          fields: ['app', 'title'],
+        },
+      ],
+    };
+
+    expect(selectAppTitleSourceId(params, 'selected')).toBe('selected');
+    expect(selectAppTitleSourceId(params, 'missing')).toBeUndefined();
   });
 
   test('browser results are unavailable when no source has an app field', () => {
@@ -152,11 +176,11 @@ describe('v2 report builders — generic activity, namespaced projection', () =>
         },
       ],
     } as CanonicalQueryParamsV2;
-    expect(selectBrowserFocusSourceId(params)).toBeUndefined();
+    expect(selectBrowserFocusSourceId(params, BUILTIN_WINDOW_SOURCE_ID)).toBeUndefined();
 
     const query = fullActivityQueryV2({
       ...params,
-      browser_focus_source_id: selectBrowserFocusSourceId(params),
+      browser_focus_source_id: selectBrowserFocusSourceId(params, BUILTIN_WINDOW_SOURCE_ID),
       browser_bucket_ids: ['aw-watcher-web-chrome_workstation'],
     } as ActivityReportParamsV2).join('\n');
     expect(query).toContain('browser_events = [];');

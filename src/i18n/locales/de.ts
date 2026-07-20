@@ -260,7 +260,7 @@ export default {
       profileUnavailable: 'Es ist kein Aktivitätsprofil verfügbar.',
       ruleUnknownSource: 'Diese Regel verweist auf eine nicht verfügbare Quelle: {source}.',
       advancedRulesNotApplied:
-        'Erweiterte Regeln werden nicht angewendet, weil dieser Server die erforderlichen flexiblen Regeln nicht unterstützt. Stattdessen werden einfache Ergebnisse angezeigt.',
+        'Dieser Server unterstützt das flexible Aktivitätsmodell dieser Übersichten nicht. Aktualisiere den ActivityWatch-Server, um Berichte anzuzeigen.',
       openRulesSettings: 'Regeleinstellungen öffnen.',
       noResolvedActivityHost:
         'Kein Gerät verfügt derzeit über genügend Watcher-Daten, um Aktivität aufzulösen.',
@@ -296,6 +296,17 @@ export default {
       sourceCreatesActivityEnabled: 'Kann Aktivitätszeiträume erzeugen',
       sourceCreatesActivityHelp:
         'Diese profilweite Einstellung lässt diesen Watcher überall als erfasste Aktivität zählen. Regeln können in beiden Fällen darauf verweisen; überlappende Quellen bleiben erhalten.',
+      sourceKeepsActiveEnabled: 'Zählt auch während AFK als aktiv',
+      sourceKeepsActiveHelp:
+        'Zeit aus dieser Quelle bleibt aktiv, wenn AFK-Zeit gefiltert wird. Für die Stoppuhr ist dies standardmäßig aktiviert.',
+      activeTimeUnavailable: 'Dieser Server kann keine konfigurierbaren Aktivzeitregeln anwenden.',
+      appTitleReportSource: 'Quelle für App- und Titelberichte',
+      appTitleReportSourceHelp:
+        'Wählen Sie die Quelle für App- und Titelaufschlüsselungen. Standard ist App & Fenster.',
+      browserFocusSource: 'Quelle für Browserfokus',
+      browserFocusSourceHelp:
+        'Wählen Sie die Quelle, deren App-Feld den Browserfokus bestimmt. Standard ist App & Fenster.',
+      presentationSourceNone: 'Keine',
       activityCoverageUnavailable:
         'Dieser Server kann aus benutzerdefinierten Quellen keine Aktivitätszeiträume erzeugen.',
       sourceInternalId: 'Interne ID',

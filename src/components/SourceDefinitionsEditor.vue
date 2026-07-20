@@ -35,6 +35,17 @@ div
           )
             | {{ $t('settings.categorization.sourceCreatesActivityEnabled') }}
           small.text-muted.d-block {{ $t('settings.categorization.sourceCreatesActivityHelp') }}
+          b-form-checkbox.mt-2(
+            v-if="source.creates_activity"
+            switch
+            :checked="!!source.keeps_active"
+            :disabled="!supportsActiveTime"
+            :title="supportsActiveTime ? '' : $t('settings.categorization.activeTimeUnavailable')"
+            @input="updateBoolean(index, 'keeps_active', $event)"
+          )
+            | {{ $t('settings.categorization.sourceKeepsActiveEnabled') }}
+          small.text-muted.d-block(v-if="source.creates_activity")
+            | {{ $t('settings.categorization.sourceKeepsActiveHelp') }}
           small.text-warning.d-block(v-if="!supportsActivityCoverage")
             | {{ $t('settings.categorization.activityCoverageUnavailable') }}
     small.text-muted.d-block.mb-2
@@ -128,6 +139,9 @@ export default {
         ) ?? false
       );
     },
+    supportsActiveTime() {
+      return this.serverStore.info?.capabilities?.includes('query.active_periods_v2.v1') ?? false;
+    },
     hasActivityCreator() {
       return (this.value as SourceDefinitionV2[]).some(source => source.creates_activity);
     },
@@ -189,12 +203,13 @@ export default {
       }
       return updated;
     },
-    updateBoolean(index: number, field: 'creates_activity', value: boolean) {
+    updateBoolean(index: number, field: 'creates_activity' | 'keeps_active', value: boolean) {
       const sources = this.value.map((source, sourceIndex) => {
         if (sourceIndex !== index) return source;
         const updated = { ...source };
         if (value) updated[field] = true;
         else delete updated[field];
+        if (field === 'creates_activity' && !value) delete updated.keeps_active;
         if (source.auto_generated) delete updated.auto_generated;
         return updated;
       });

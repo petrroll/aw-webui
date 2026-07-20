@@ -37,7 +37,7 @@ describe('timeline category activity slices', () => {
         host: 'test',
         buckets: buckets as any,
       })
-    ).toBe(true);
+    ).toBe(false);
   });
   test('resolves configured and inherited colors from the canonical category set', () => {
     const categoryColor = buildTimelineCategoryColorResolver({

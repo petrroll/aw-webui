@@ -56,7 +56,7 @@ import { useCategoryStore } from '~/stores/categories';
 import { useSettingsStore } from '~/stores/settings';
 import { getClient } from '~/util/awclient';
 import { get_inclusive_local_date_range } from '~/util/time';
-import { hostCanResolveProfile } from '~/util/activityProfile';
+import { hostHasResolvedActivityV2, hostHasResolvedActiveTimeV2 } from '~/util/activityProfile';
 
 export default {
   name: 'RulesPreview',
@@ -80,8 +80,8 @@ export default {
   computed: {
     available: function () {
       return (
-        !!this.settingsStore.compiledRulesV2 &&
-        this.settingsStore.compiledRulesV2.capabilities.includes(
+        !!this.settingsStore.compiledActivityQueryV2 &&
+        this.settingsStore.compiledActivityQueryV2.capabilities.includes(
           RULE_ENGINE_CAPABILITIES.explainCategorize
         )
       );
@@ -90,20 +90,24 @@ export default {
   async mounted() {
     await this.settingsStore.ensureLoaded();
     await this.bucketsStore.ensureLoaded();
-    this.queryOptions.hostname =
-      this.bucketsStore.hosts.find(host =>
-        hostCanResolveProfile({
-          host,
-          buckets: this.bucketsStore.buckets,
-          compiled: this.settingsStore.compiledRulesV2,
-          filterAfk: this.queryOptions.filter_afk,
-        })
-      ) ?? '';
+    const compiledV2 = this.settingsStore.compiledActivityQueryV2;
+    const activeTime = this.settingsStore.rulesV2.activity_profiles_v2[0]?.active_time;
+    this.queryOptions.hostname = compiledV2
+      ? this.bucketsStore.hosts.find(
+          host =>
+            hostHasResolvedActivityV2(host, this.bucketsStore.buckets, compiledV2) &&
+            (!this.queryOptions.filter_afk ||
+              hostHasResolvedActiveTimeV2(host, this.bucketsStore.buckets, compiledV2, {
+                includeAudible:
+                  activeTime?.type === 'legacy' ? activeTime.include_audible : undefined,
+                browserBucketIds: this.bucketsStore.bucketsBrowser(host),
+              }))
+        ) ?? ''
+      : '';
   },
   methods: {
     async preview() {
-      const advanced = this.settingsStore.compiledRulesV2;
-      if (!advanced || !this.queryOptions.hostname) return;
+      if (!this.settingsStore.compiledActivityQueryV2 || !this.queryOptions.hostname) return;
       this.loading = true;
       this.hasPreviewed = true;
       this.error = '';
@@ -111,23 +115,11 @@ export default {
         const activeTime = this.settingsStore.rulesV2.activity_profiles_v2[0]?.active_time;
         const { query, materialized } = resolveActivityEventsQuery({
           host: this.queryOptions.hostname,
+          filter_afk: this.queryOptions.filter_afk,
           v2: {
             filter_afk: this.queryOptions.filter_afk,
             filter_categories: null,
             include_audible: activeTime?.type === 'legacy' ? activeTime.include_audible : false,
-            explain_categories: true,
-          },
-          legacyParams: {
-            hostname: this.queryOptions.hostname,
-            bid_window: this.bucketsStore.bucketsWindow(this.queryOptions.hostname)[0],
-            bid_afk: this.bucketsStore.bucketsAFK(this.queryOptions.hostname)[0],
-            bid_browsers: this.bucketsStore.bucketsBrowser(this.queryOptions.hostname),
-            filter_afk: this.queryOptions.filter_afk,
-            include_audible: activeTime?.type === 'legacy' ? activeTime.include_audible : false,
-            always_active_pattern: this.settingsStore.always_active_pattern,
-            categories: this.categoryStore.classes_for_query,
-            filter_categories: null,
-            ...advanced,
             explain_categories: true,
           },
           returnStatement: 'RETURN = limit_events(sort_by_duration(events), 100);',

@@ -109,7 +109,7 @@ describe('settings store', () => {
 
     await settingsStore.load();
 
-    expect(settingsStore.activity_profiles_v2?.[0].source_defaults_version).toBe(2);
+    expect(settingsStore.activity_profiles_v2?.[0].source_defaults_version).toBe(3);
     expect(settingsStore.activity_profiles_v2?.[0].sources).toEqual([
       expect.objectContaining({
         id: 'builtin_window',
@@ -123,6 +123,7 @@ describe('settings store', () => {
         id: 'stopwatch',
         builtin: 'stopwatch',
         creates_activity: true,
+        keeps_active: true,
       }),
     ]);
     expect(post).not.toHaveBeenCalled();
@@ -164,6 +165,11 @@ describe('settings store', () => {
     await settingsStore.load();
 
     expect(settingsStore.activity_profiles_v2?.[0].sources).toEqual([]);
+    expect(settingsStore.activity_profiles_v2?.[0]).toMatchObject({
+      source_defaults_version: 3,
+      app_title_source_id: 'builtin_window',
+      browser_focus_source_id: 'builtin_window',
+    });
     Reflect.deleteProperty(global, 'localStorage');
   });
 

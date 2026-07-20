@@ -71,7 +71,6 @@ import { resolveActivityEventsQuery } from '~/util/activityQuery';
 
 import { useCategoryStore } from '~/stores/categories';
 import { useBucketsStore } from '~/stores/buckets';
-import { useSettingsStore } from '~/stores/settings';
 
 import { getClient } from '~/util/awclient';
 
@@ -116,18 +115,10 @@ export default {
         : null;
       const { query: query_array } = resolveActivityEventsQuery({
         host: this.queryOptions.hostname,
+        filter_afk: this.queryOptions.filter_afk,
         v2: {
           filter_afk: this.queryOptions.filter_afk,
           filter_categories,
-        },
-        legacyParams: {
-          hostname: this.queryOptions.hostname,
-          bid_window: this.bucketsStore.bucketsWindow(this.queryOptions.hostname)[0],
-          bid_afk: this.bucketsStore.bucketsAFK(this.queryOptions.hostname)[0],
-          filter_afk: this.queryOptions.filter_afk,
-          categories: this.categoryStore.classes_for_query,
-          filter_categories,
-          ...useSettingsStore().compiledRulesV2,
         },
       });
       const start = moment(this.queryOptions.start).format();

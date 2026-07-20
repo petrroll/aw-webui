@@ -5,11 +5,7 @@ import { map, filter, values, groupBy, sortBy, flow, reverse } from 'lodash/fp';
 import { IEvent } from '~/util/interfaces';
 
 import { window_events } from '~/util/fakedata';
-import queries, {
-  queryStringToArray,
-  resolveActivityProfile,
-  resolveActivityProfileV2,
-} from '~/queries';
+import queries, { queryStringToArray, resolveActivityProfileV2 } from '~/queries';
 import { get_day_start_with_offset } from '~/util/time';
 import {
   TimePeriod,
@@ -25,8 +21,6 @@ import { useSettingsStore } from '~/stores/settings';
 import { useBucketsStore } from '~/stores/buckets';
 import { useCategoryStore } from '~/stores/categories';
 import {
-  hostHasResolvedActivity,
-  hostHasResolvedActiveTime,
   hostHasResolvedActivityV2,
   hostHasResolvedActiveTimeV2,
   queryNeedsResolvedActiveTime,
@@ -34,6 +28,7 @@ import {
 export { queryNeedsResolvedActiveTime } from '~/util/activityProfile';
 
 import {
+  ACTIVITY_V2_UNSUPPORTED_ERROR,
   buildFullActivityQueryV2,
   buildFullActivityMultiQueryV2,
   materializeHostActivityV2,
@@ -80,8 +75,8 @@ function scoreCategories(events: IEvent[]): IEvent[] {
 // Builds the central v2 host input on capable servers (where a compiled v2 query
 // exists). Callers use this to materialize a source-only query per host without
 // ever hand-injecting bid_window / bid_afk / always_active_pattern / bid_stopwatch.
-// Returns undefined on old servers / custom setups without a compiled v2 query,
-// in which case callers fall back to the legacy resolveActivityProfile path.
+// Returns undefined when the server cannot compile the v2 query. Desktop
+// dashboard callers must surface that unsupported state instead of falling back.
 function hostActivityInputV2(
   host: string,
   opts: {
@@ -394,13 +389,10 @@ export const useActivityStore = defineStore('activity', {
         filter_afk,
         include_audible,
         include_stopwatch,
-        always_active_pattern,
       }: QueryOptions,
       hosts: string[]
     ) {
       const periods = [timeperiodToStr(timeperiod)];
-      const categories = useCategoryStore().classes_for_query;
-
       // Capable servers: union per-host source-only v2 queries (no bid_window).
       const v2Inputs = hosts
         .map(host =>
@@ -437,21 +429,7 @@ export const useActivityStore = defineStore('activity', {
         }
         return;
       }
-
-      // Old-server / custom-UI compatibility: legacy multidevice query.
-      const host_params = this.multideviceHostParams(hosts, true);
-      const q = queries.multideviceQuery({
-        hosts,
-        filter_afk,
-        categories,
-        filter_categories,
-        host_params,
-        include_audible,
-        always_active_pattern,
-        ...useSettingsStore().compiledRulesV2,
-      });
-      const data = await getClient().query(periods, q, { name: 'multidevice', verbose: true });
-      this.query_activity_completed(data[0].window);
+      throw new Error(ACTIVITY_V2_UNSUPPORTED_ERROR);
     },
 
     eligibleMultideviceHosts(queryOptions: QueryOptions): string[] {
@@ -475,35 +453,7 @@ export const useActivityStore = defineStore('activity', {
             (!host.startsWith('fakedata') || queryOptions.host.startsWith('fakedata'))
         );
       }
-      const needsActiveTime = queryNeedsResolvedActiveTime(
-        queryOptions.filter_afk,
-        (settingsStore.compiledRulesV2?.background_sources.length ?? 0) > 0
-      );
-      return bucketsStore.hosts.filter(
-        host =>
-          host &&
-          hostHasResolvedActivity(host, bucketsStore.buckets, settingsStore.compiledRulesV2) &&
-          (!needsActiveTime ||
-            hostHasResolvedActiveTime(host, bucketsStore.buckets, settingsStore.compiledRulesV2)) &&
-          (!host.startsWith('fakedata') || queryOptions.host.startsWith('fakedata'))
-      );
-    },
-
-    multideviceHostParams(hosts: string[], includeStopwatch: boolean) {
-      const bucketsStore = useBucketsStore();
-      return Object.fromEntries(
-        hosts.map(host => [
-          host,
-          {
-            bid_window: bucketsStore.bucketsWindow(host)[0],
-            bid_afk: bucketsStore.bucketsAFK(host)[0],
-            bid_browsers: bucketsStore.bucketsByType(host, 'web.tab.current'),
-            bid_stopwatch: includeStopwatch
-              ? bucketsStore.bucketsByType(host, 'general.stopwatch')[0]
-              : undefined,
-          },
-        ])
-      );
+      return [];
     },
 
     async query_desktop_full({
@@ -512,11 +462,9 @@ export const useActivityStore = defineStore('activity', {
       filter_afk,
       include_audible,
       include_stopwatch,
-      always_active_pattern,
       host,
     }: QueryOptions) {
       const periods = [timeperiodToStr(timeperiod)];
-      const categories = useCategoryStore().classes_for_query;
 
       // Capable servers: build a source-only v2 query (no bid_window/bid_afk/
       // always_active_pattern/bid_stopwatch). App/title summaries are a
@@ -550,33 +498,7 @@ export const useActivityStore = defineStore('activity', {
         }
         return;
       }
-
-      // Old-server / custom-UI compatibility: legacy full desktop query.
-      const q = queries.fullDesktopQuery({
-        hostname: host,
-        bid_window: this.buckets.window[0],
-        bid_afk: this.buckets.afk[0],
-        bid_browsers: this.buckets.browser,
-        bid_stopwatch:
-          include_stopwatch && this.buckets.stopwatch.length > 0
-            ? this.buckets.stopwatch[0]
-            : undefined,
-        filter_afk,
-        categories,
-        filter_categories,
-        include_audible,
-        always_active_pattern,
-        ...useSettingsStore().compiledRulesV2,
-      });
-      const data = await getClient().query(periods, q, {
-        name: 'fullDesktopQuery',
-        verbose: true,
-      });
-      this.query_activity_completed(data[0].window);
-      this.query_browser_completed(data[0].browser);
-      if (include_stopwatch) {
-        this.query_stopwatch_completed(data[0].stopwatch);
-      }
+      throw new Error(ACTIVITY_V2_UNSUPPORTED_ERROR);
     },
 
     async query_editor({ timeperiod }) {
@@ -658,75 +580,7 @@ export const useActivityStore = defineStore('activity', {
         return;
       }
 
-      // Old-server / custom-UI compatibility: legacy resolveActivityProfile path.
-      let activeHosts: string[] = [];
-      const advanced = settingsStore.compiledRulesV2;
-      if (settingsStore.useMultidevice) {
-        activeHosts = bucketsStore.hosts.filter(
-          candidateHost =>
-            candidateHost &&
-            candidateHost !== 'unknown' &&
-            hostHasResolvedActiveTime(
-              candidateHost,
-              bucketsStore.buckets,
-              settingsStore.compiledRulesV2
-            ) &&
-            hostHasResolvedActivity(
-              candidateHost,
-              bucketsStore.buckets,
-              settingsStore.compiledRulesV2
-            ) &&
-            (!candidateHost.startsWith('fakedata') || host.startsWith('fakedata'))
-        );
-      } else {
-        activeHosts =
-          hostHasResolvedActiveTime(host, bucketsStore.buckets, advanced) &&
-          hostHasResolvedActivity(host, bucketsStore.buckets, advanced)
-            ? [host]
-            : [];
-      }
-      const profile = settingsStore.rulesV2.activity_profiles_v2[0];
-      const {
-        category_specs: _categorySpecs,
-        context_sources: _contextSources,
-        ...activityOptions
-      } = advanced ?? {};
-      const hostQueries = activeHosts.map((activeHost, index) => {
-        const suffix = `active_host_${index}`;
-        return (
-          resolveActivityProfile({
-            hostname: activeHost,
-            bid_window: bucketsStore.bucketsWindow(activeHost)[0],
-            bid_afk: bucketsStore.bucketsAFK(activeHost)[0],
-            bid_browsers: bucketsStore.bucketsBrowser(activeHost),
-            filter_afk: false,
-            include_audible:
-              profile?.active_time.type === 'legacy'
-                ? profile.active_time.include_audible
-                : undefined,
-            always_active_pattern: settingsStore.always_active_pattern || undefined,
-            categories: [],
-            filter_categories: null,
-            return_variable_suffix: suffix,
-            ...activityOptions,
-          }) + `\nactive_${suffix} = filter_period_intersect(events_${suffix}, not_afk_${suffix});`
-        );
-      });
-      const union = activeHosts
-        .map(
-          (_activeHost, index) =>
-            `active_events = union_no_overlap(active_events, active_active_host_${index});`
-        )
-        .join('\n');
-      const query = queryStringToArray(
-        `${hostQueries.join('\n')}\nactive_events = [];\n${union}\nRETURN = active_events;`
-      );
-      const data = await getClient().query(periods, query, {
-        name: 'activityQuery',
-        verbose: true,
-      });
-      const active_history = _.zipObject(periods, data);
-      this.query_active_history_completed({ active_history });
+      throw new Error(ACTIVITY_V2_UNSUPPORTED_ERROR);
     },
 
     async query_category_time_by_period({
@@ -843,8 +697,9 @@ export const useActivityStore = defineStore('activity', {
           }
         }
 
-        // Old-server / custom-UI compatibility (or Android): legacy categoryQuery.
+        // Android remains an explicitly separate legacy query path.
         if (!query) {
+          if (!isAndroid) throw new Error(ACTIVITY_V2_UNSUPPORTED_ERROR);
           // TODO: Clean up call, pass QueryParams in fullDesktopQuery as well
           // TODO: Unify QueryOptions and QueryParams
           query = queries.categoryQuery({
@@ -858,33 +713,15 @@ export const useActivityStore = defineStore('activity', {
             filter_afk,
             include_audible,
             always_active_pattern,
-            ...(multideviceHosts.length > 0
+            hostname: host,
+            bid_android: this.buckets.android[0],
+            ...(advanced
               ? {
-                  hosts: multideviceHosts,
-                  host_params: this.multideviceHostParams(
-                    multideviceHosts,
-                    include_stopwatch ?? false
-                  ),
-                  ...advanced,
+                  category_specs: advanced.category_specs,
+                  context_sources: advanced.context_sources,
+                  capabilities: advanced.capabilities,
                 }
-              : isAndroid
-              ? {
-                  hostname: host,
-                  bid_android: this.buckets.android[0],
-                  ...(advanced
-                    ? {
-                        category_specs: advanced.category_specs,
-                        context_sources: advanced.context_sources,
-                        capabilities: advanced.capabilities,
-                      }
-                    : {}),
-                }
-              : {
-                  hostname: host,
-                  bid_afk: this.buckets.afk[0],
-                  bid_window: this.buckets.window[0],
-                  ...advanced,
-                }),
+              : {}),
           });
         }
         const result = await getClient().query([period], query, {
@@ -949,17 +786,9 @@ export const useActivityStore = defineStore('activity', {
         );
         needsActiveTime = queryNeedsResolvedActiveTime(this.query_options?.filter_afk, false);
       } else {
-        const compiled = settingsStore.compiledRulesV2;
-        activityAvailable = hostHasResolvedActivity(currentHost, bucketsStore.buckets, compiled);
-        activeTimeAvailable = hostHasResolvedActiveTime(
-          currentHost,
-          bucketsStore.buckets,
-          compiled
-        );
-        needsActiveTime = queryNeedsResolvedActiveTime(
-          this.query_options?.filter_afk,
-          (compiled?.background_sources.length ?? 0) > 0
-        );
+        activityAvailable = false;
+        activeTimeAvailable = false;
+        needsActiveTime = true;
       }
 
       this.activity.available = activityAvailable && (!needsActiveTime || activeTimeAvailable);

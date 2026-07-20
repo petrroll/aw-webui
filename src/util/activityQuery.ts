@@ -5,17 +5,15 @@
 // compiled query per host (filling the configured default window source's actual
 // bucket IDs only when that source exists) and builds a source-only query that
 // never injects bid_window / bid_afk / always_active_pattern / bid_stopwatch or
-// any root app/title field. Old-server / custom-UI compatibility alone falls back
-// to the legacy resolveActivityProfile / fullDesktopQuery entry points.
+// any root app/title field. Unsupported servers fail visibly instead of
+// substituting legacy dashboard results.
 
 import type { IBucket, IEvent } from '~/util/interfaces';
 import type { CompiledActivityQueryV2 } from '~/util/rulesV2';
-import { BUILTIN_WINDOW_SOURCE_ID } from '~/util/rulesV2';
 import { materializeActivityQueryV2 } from '~/util/materializeV2';
 import { useSettingsStore } from '~/stores/settings';
 import { useBucketsStore } from '~/stores/buckets';
 import {
-  resolveActivityProfile,
   resolveActivityProfileV2,
   fullActivityQueryV2,
   fullActivityMultiQueryV2,
@@ -24,8 +22,10 @@ import {
   type CategorySpecV2,
   type ActivityCoverageSource,
   type ContextSource,
-  type DesktopQueryParams,
 } from '~/queries';
+
+export const ACTIVITY_V2_UNSUPPORTED_ERROR =
+  "This server doesn't support the flexible activity model this dashboard needs. Update your ActivityWatch server to see these reports.";
 
 export interface HostActivityInput {
   host: string;
@@ -57,29 +57,31 @@ export interface MaterializedHostActivity {
 // source whose flat fields include both app and title. The default window source
 // (builtin_window) is preferred when it is actually configured, but any other
 // source qualifies. When none exists the app/title summaries are simply empty.
-export function selectAppTitleSourceId(params: CanonicalQueryParamsV2): string | undefined {
+export function selectAppTitleSourceId(
+  params: CanonicalQueryParamsV2,
+  configuredSourceId?: string
+): string | undefined {
+  if (!configuredSourceId) return undefined;
   const sources = [...(params.activity_coverage_sources ?? []), ...(params.context_sources ?? [])];
   const hasAppTitle = (source: ActivityCoverageSource | ContextSource) =>
     source.fields?.includes('app') && source.fields?.includes('title');
-  const windowSource = sources.find(
-    source => source.source_id === BUILTIN_WINDOW_SOURCE_ID && hasAppTitle(source)
-  );
-  if (windowSource) return windowSource.source_id;
-  return sources.find(hasAppTitle)?.source_id;
+  return sources.find(source => source.source_id === configuredSourceId && hasAppTitle(source))
+    ?.source_id;
 }
 
 // Browser focus is derived from an explicit configured source whose flat fields
 // include app. The default window source is preferred only if it is configured;
 // otherwise the first source with an app field is used, and if none exists
 // browser results are simply unavailable. Never a canonical root app field.
-export function selectBrowserFocusSourceId(params: CanonicalQueryParamsV2): string | undefined {
+export function selectBrowserFocusSourceId(
+  params: CanonicalQueryParamsV2,
+  configuredSourceId?: string
+): string | undefined {
+  if (!configuredSourceId) return undefined;
   const sources = [...(params.activity_coverage_sources ?? []), ...(params.context_sources ?? [])];
   const hasApp = (source: ActivityCoverageSource | ContextSource) => source.fields?.includes('app');
-  const windowSource = sources.find(
-    source => source.source_id === BUILTIN_WINDOW_SOURCE_ID && hasApp(source)
-  );
-  if (windowSource) return windowSource.source_id;
-  return sources.find(hasApp)?.source_id;
+  return sources.find(source => source.source_id === configuredSourceId && hasApp(source))
+    ?.source_id;
 }
 
 // Stopwatch, when requested, is materialized as an ordinary namespaced coverage
@@ -119,8 +121,11 @@ export function materializeHostActivityV2(
   }
   return {
     params,
-    appTitleSourceId: selectAppTitleSourceId(params),
-    browserFocusSourceId: selectBrowserFocusSourceId(params),
+    appTitleSourceId: selectAppTitleSourceId(params, input.compiledV2.app_title_source_id),
+    browserFocusSourceId: selectBrowserFocusSourceId(
+      params,
+      input.compiledV2.browser_focus_source_id
+    ),
     stopwatchSourceId: selectStopwatchSourceId(params, input.include_stopwatch),
   };
 }
@@ -128,11 +133,10 @@ export function materializeHostActivityV2(
 // Store-aware convenience for Vue callers. On capable servers (compiled v2 query
 // present) it materializes a source-only canonical-events query for the host and
 // never injects bid_window / bid_afk / always_active_pattern / bid_stopwatch. On
-// old servers / custom setups it falls back to the caller-provided legacy params
-// (which may still carry bid_window etc. for old-server compatibility).
+// unsupported servers throw a visible compatibility error.
 export function resolveActivityEventsQuery(opts: {
   host: string;
-  legacyParams: DesktopQueryParams;
+  filter_afk?: boolean;
   v2?: {
     filter_afk?: boolean;
     filter_categories?: string[][] | null;
@@ -147,34 +151,30 @@ export function resolveActivityEventsQuery(opts: {
   const settingsStore = useSettingsStore();
   const bucketsStore = useBucketsStore();
   const compiledV2 = settingsStore.compiledActivityQueryV2;
-  const v2Input: HostActivityInput | undefined = compiledV2
-    ? {
-        host: opts.host,
-        buckets: bucketsStore.buckets,
-        compiledV2,
-        filter_afk: opts.v2?.filter_afk ?? opts.legacyParams.filter_afk,
-        filter_categories: opts.v2?.filter_categories ?? null,
-        include_audible: opts.v2?.include_audible,
-        browser_bucket_ids: bucketsStore.bucketsBrowser(opts.host),
-        explain_categories: opts.v2?.explain_categories,
-        return_variable_suffix: opts.v2?.return_variable_suffix,
-        category_specs: opts.v2?.category_specs,
-        extra_context_sources: opts.v2?.extra_context_sources,
-      }
-    : undefined;
+  if (!compiledV2) throw new Error(ACTIVITY_V2_UNSUPPORTED_ERROR);
+  const v2Input: HostActivityInput = {
+    host: opts.host,
+    buckets: bucketsStore.buckets,
+    compiledV2,
+    filter_afk: opts.v2?.filter_afk ?? opts.filter_afk,
+    filter_categories: opts.v2?.filter_categories ?? null,
+    include_audible: opts.v2?.include_audible,
+    browser_bucket_ids: bucketsStore.bucketsBrowser(opts.host),
+    explain_categories: opts.v2?.explain_categories,
+    return_variable_suffix: opts.v2?.return_variable_suffix,
+    category_specs: opts.v2?.category_specs,
+    extra_context_sources: opts.v2?.extra_context_sources,
+  };
   return buildActivityEventsQuery({
-    v2: v2Input ?? { host: opts.host, buckets: [] },
-    legacyParams: opts.legacyParams,
+    v2: v2Input,
     returnStatement: opts.returnStatement,
   });
 }
 
 // Builds a canonical-events query returning `events` (or a custom return
-// statement). Uses the v2 source-only pipeline on capable servers, otherwise the
-// legacy resolveActivityProfile entry point for old-server/custom-UI compat.
+// statement). New WebUI callers require the v2 source-only pipeline.
 export function buildActivityEventsQuery(opts: {
   v2: HostActivityInput;
-  legacyParams: DesktopQueryParams;
   returnStatement?: string;
 }): { query: string[]; materialized: MaterializedHostActivity | null } {
   const returnStatement = opts.returnStatement ?? 'RETURN = events;';
@@ -185,10 +185,7 @@ export function buildActivityEventsQuery(opts: {
     );
     return { query, materialized };
   }
-  const query = queryStringToArray(
-    `${resolveActivityProfile(opts.legacyParams)}\n${returnStatement}`
-  );
-  return { query, materialized: null };
+  throw new Error(ACTIVITY_V2_UNSUPPORTED_ERROR);
 }
 
 // Builds the full activity report query (generic `activity` section, browser and
@@ -235,7 +232,7 @@ export function buildFullActivityMultiQueryV2(
 }
 
 // Materializes several hosts for capable servers. Returns null when no compiled
-// v2 query exists (old-server/custom fallback) or no host materializes.
+// v2 query exists or no host materializes.
 export function materializeHostsV2(
   hosts: string[],
   opts: {

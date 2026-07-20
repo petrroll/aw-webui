@@ -124,9 +124,8 @@ import { mapState } from 'pinia';
 import { useSettingsStore } from '~/stores/settings';
 import { useBucketsStore } from '~/stores/buckets';
 import { getClient } from '~/util/awclient';
-import { hostHasResolvedActiveTime, hostHasResolvedActiveTimeV2 } from '~/util/activityProfile';
+import { hostHasResolvedActiveTimeV2 } from '~/util/activityProfile';
 import { resolveActivityEventsQuery } from '~/util/activityQuery';
-import { useCategoryStore } from '~/stores/categories';
 import { seconds_to_duration } from '~/util/time';
 import TimelineFilterSelect from '~/components/TimelineFilterSelect.vue';
 import {
@@ -311,17 +310,22 @@ export default {
     async _queryCategoryResultBuckets(generation) {
       const bucketsStore = useBucketsStore();
       const settingsStore = useSettingsStore();
-      const categoryStore = useCategoryStore();
       if (generation === this.loadGeneration) this.categoryResultMessage = '';
       const visibleHosts = this.filter_hostnames.length > 0 ? this.filter_hostnames : this.hosts;
-      const advanced = settingsStore.compiledRulesV2;
       const compiledV2 = settingsStore.compiledActivityQueryV2;
+      if (!compiledV2) {
+        if (generation === this.loadGeneration) {
+          this.categoryResultMessage = String(
+            this.$t('settings.categorization.advancedRulesNotApplied')
+          );
+        }
+        return [];
+      }
       const eligibleHosts = visibleHosts.filter(hostname =>
         hostCanResolveTimelineCategory({
           host: hostname,
           buckets: bucketsStore.buckets,
           compiledV2,
-          compiledLegacy: advanced,
         })
       );
       if (eligibleHosts.length === 0) {
@@ -340,9 +344,6 @@ export default {
       const categoryColor = buildTimelineCategoryColorResolver(categorySet);
       const results = await Promise.all(
         eligibleHosts.map(async hostname => {
-          const windowBucketIds = bucketsStore.bucketsWindow(hostname);
-          const afkBucketIds = bucketsStore.bucketsAFK(hostname);
-
           try {
             const profile = settingsStore.rulesV2.activity_profiles_v2[0];
             const activeTime = profile?.active_time;
@@ -352,43 +353,28 @@ export default {
     `;
             const { query: queryArray } = resolveActivityEventsQuery({
               host: hostname,
+              filter_afk: false,
               v2: {
                 filter_afk: false,
                 filter_categories: null,
                 include_audible:
                   activeTime?.type === 'legacy' ? activeTime.include_audible : undefined,
               },
-              legacyParams: {
-                hostname,
-                bid_window: windowBucketIds[0],
-                bid_afk: afkBucketIds[0],
-                bid_browsers: bucketsStore.bucketsBrowser(hostname),
-                bid_stopwatch: bucketsStore.bucketsStopwatch(hostname)[0],
-                filter_afk: false,
-                include_audible:
-                  activeTime?.type === 'legacy' ? activeTime.include_audible : undefined,
-                always_active_pattern: this.always_active_pattern || undefined,
-                categories: categoryStore.classes_for_query,
-                filter_categories: null,
-                ...(advanced ?? {}),
-              },
               returnStatement: timelineReturn,
             });
             const period = `${this.daterange[0].format()}/${this.daterange[1].format()}`;
             const data = await getClient().query([period], queryArray);
             const result = data[0] ?? {};
-            const hasActiveTime = settingsStore.compiledActivityQueryV2
-              ? hostHasResolvedActiveTimeV2(
-                  hostname,
-                  bucketsStore.buckets,
-                  settingsStore.compiledActivityQueryV2,
-                  {
-                    includeAudible:
-                      activeTime?.type === 'legacy' ? activeTime.include_audible : undefined,
-                    browserBucketIds: bucketsStore.bucketsBrowser(hostname),
-                  }
-                )
-              : hostHasResolvedActiveTime(hostname, bucketsStore.buckets, advanced);
+            const hasActiveTime = hostHasResolvedActiveTimeV2(
+              hostname,
+              bucketsStore.buckets,
+              compiledV2,
+              {
+                includeAudible:
+                  activeTime?.type === 'legacy' ? activeTime.include_audible : undefined,
+                browserBucketIds: bucketsStore.bucketsBrowser(hostname),
+              }
+            );
             const categoryEvents = result.all ?? [];
             const activeEvents = hasActiveTime ? result.active ?? [] : categoryEvents;
             const events = splitCategoryEventsByActivity(categoryEvents, activeEvents).map(

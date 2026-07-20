@@ -107,6 +107,7 @@ export interface ActivityCoverageSource {
   scope?: 'host' | 'global';
   bucket_hosts?: Record<string, string>;
   fields: string[];
+  keeps_active?: boolean;
   host?: string;
 }
 
@@ -417,8 +418,8 @@ ${variable} = union_no_overlap(${variable}, activity_bucket_${index}_${bucketInd
     .join('\n');
 }
 
-function activityCoverageEvents(params: DesktopQueryParams): string {
-  const sources = (params.activity_coverage_sources ?? [])
+function resolvedActivityCoverageSources(params: DesktopQueryParams): ActivityCoverageSource[] {
+  return (params.activity_coverage_sources ?? [])
     .map(source => ({
       ...source,
       bucket_ids: materializeBuiltinBucketIds(source, params),
@@ -430,6 +431,10 @@ function activityCoverageEvents(params: DesktopQueryParams): string {
           : source.scope,
     }))
     .filter(source => source.bucket_ids.length > 0 || !source.builtin);
+}
+
+function activityCoverageEvents(params: DesktopQueryParams): string {
+  const sources = resolvedActivityCoverageSources(params);
   if (sources.length === 0) return '';
   requireCapability(params, RULE_ENGINE_CAPABILITIES.sourceNamespace, 'Activity coverage sources');
   validateUniqueSourceIds(sources, 'Activity coverage');
@@ -481,6 +486,17 @@ ${variable} = union_no_overlap(${variable}, activity_coverage_bucket_${index}_${
     .join('\n');
 
   return `${loadCoverage}\n${enrichCoverage}`;
+}
+
+function activityCoverageActiveOverrides(params: DesktopQueryParams): string {
+  return resolvedActivityCoverageSources(params)
+    .map((source, index) =>
+      source.keeps_active
+        ? `not_afk = period_union(not_afk, activity_coverage_period_${index});`
+        : ''
+    )
+    .filter(Boolean)
+    .join('\n');
 }
 
 function backgroundActivityEvents(params: DesktopQueryParams): string {
@@ -806,6 +822,7 @@ export function resolveActivityProfileV2(params: CanonicalQueryParamsV2): string
     hasActiveTimeRule ? '' : 'not_afk = [];',
     activityCoverageEvents(helperParams),
     activeTimeEvents(helperParams),
+    params.filter_afk ? activityCoverageActiveOverrides(helperParams) : '',
     params.filter_afk
       ? hasActiveTimeRule
         ? 'events = filter_period_intersect(events, not_afk);'

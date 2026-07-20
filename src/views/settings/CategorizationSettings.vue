@@ -113,6 +113,25 @@ div
         :sources="advancedSources"
       )
       b-alert(variant="danger" :show="!!sourceSaveError") {{ sourceSaveError }}
+      b-form-row(v-if="sourceDefinitionsAvailable")
+        b-col
+          b-form-group(:label="$t('settings.categorization.appTitleReportSource')")
+            b-form-select(
+              size="sm"
+              v-model="advancedAppTitleSourceId"
+              :options="appTitleSourceOptions"
+            )
+            small.text-muted
+              | {{ $t('settings.categorization.appTitleReportSourceHelp') }}
+        b-col
+          b-form-group(:label="$t('settings.categorization.browserFocusSource')")
+            b-form-select(
+              size="sm"
+              v-model="advancedBrowserFocusSourceId"
+              :options="browserFocusSourceOptions"
+            )
+            small.text-muted
+              | {{ $t('settings.categorization.browserFocusSourceHelp') }}
       SourceDefinitionsEditor(
         v-if="sourceDefinitionsAvailable"
         v-model="advancedSources"
@@ -196,6 +215,7 @@ import {
   computeRulesSimplificationLosses,
   hasRulesSimplificationLosses,
   inferRulesEditorMode,
+  initializeProfileSourceDefaults,
   resolveRulesV2Settings,
   type RulesEditorMode,
   type RulesSimplificationLossSet,
@@ -235,7 +255,10 @@ export default {
     builderMounted: false,
     sourcesOpen: false,
     advancedSources: [] as SourceDefinitionV2[],
+    advancedAppTitleSourceId: null as string | null,
+    advancedBrowserFocusSourceId: null as string | null,
     loadedSourcesJson: '',
+    loadedPresentationJson: '',
     sourceSaveError: '',
     sourceValidationAttempted: false,
     categorySaveError: '',
@@ -280,16 +303,47 @@ export default {
         return [String(this.$t('settings.categorization.profileUnavailable'))];
       }
       return validateProfileRulesV2(
-        { ...profile, sources: this.advancedSources },
+        {
+          ...profile,
+          sources: this.advancedSources,
+          app_title_source_id: this.advancedAppTitleSourceId ?? undefined,
+          browser_focus_source_id: this.advancedBrowserFocusSourceId ?? undefined,
+        },
         rules.category_sets_v2
       );
     },
     advancedSourcesDirty: function () {
-      const persisted = this.settingsStore.rulesV2.activity_profiles_v2[0]?.sources ?? [];
-      return JSON.stringify(this.advancedSources) !== JSON.stringify(persisted);
+      const profile = this.settingsStore.rulesV2.activity_profiles_v2[0];
+      const persistedSources = profile?.sources ?? [];
+      return (
+        JSON.stringify(this.advancedSources) !== JSON.stringify(persistedSources) ||
+        this.advancedAppTitleSourceId !== (profile?.app_title_source_id ?? null) ||
+        this.advancedBrowserFocusSourceId !== (profile?.browser_focus_source_id ?? null)
+      );
     },
     canonicalSourcesJson: function () {
-      return JSON.stringify(this.settingsStore.rulesV2.activity_profiles_v2[0]?.sources ?? []);
+      const profile = this.settingsStore.rulesV2.activity_profiles_v2[0];
+      return JSON.stringify({
+        sources: profile?.sources ?? [],
+        app_title_source_id: profile?.app_title_source_id ?? null,
+        browser_focus_source_id: profile?.browser_focus_source_id ?? null,
+      });
+    },
+    appTitleSourceOptions: function () {
+      return [
+        { value: null, text: this.$t('settings.categorization.presentationSourceNone') },
+        ...this.advancedSources
+          .filter(source => source.fields.includes('app') && source.fields.includes('title'))
+          .map(source => ({ value: source.id, text: source.label || source.id })),
+      ];
+    },
+    browserFocusSourceOptions: function () {
+      return [
+        { value: null, text: this.$t('settings.categorization.presentationSourceNone') },
+        ...this.advancedSources
+          .filter(source => source.fields.includes('app'))
+          .map(source => ({ value: source.id, text: source.label || source.id })),
+      ];
     },
     currentSimplificationLosses: function (): RulesSimplificationLossSet {
       const rules = this.settingsStore.rulesV2;
@@ -355,18 +409,33 @@ export default {
       this.categoryStore.setRulesV2DraftDirty('sources', value);
     },
     canonicalSourcesJson(value: string) {
-      if (JSON.stringify(this.advancedSources) === this.loadedSourcesJson) {
-        this.advancedSources = JSON.parse(value);
+      if (
+        JSON.stringify({
+          sources: this.advancedSources,
+          app_title_source_id: this.advancedAppTitleSourceId,
+          browser_focus_source_id: this.advancedBrowserFocusSourceId,
+        }) === this.loadedPresentationJson
+      ) {
+        const parsed = JSON.parse(value);
+        this.advancedSources = parsed.sources;
+        this.advancedAppTitleSourceId = parsed.app_title_source_id;
+        this.advancedBrowserFocusSourceId = parsed.browser_focus_source_id;
       }
-      this.loadedSourcesJson = value;
+      this.loadedPresentationJson = value;
     },
   },
   async mounted() {
     await this.settingsStore.ensureLoaded();
-    this.advancedSources = JSON.parse(
-      JSON.stringify(this.settingsStore.rulesV2.activity_profiles_v2[0]?.sources ?? [])
-    );
+    const profile = this.settingsStore.rulesV2.activity_profiles_v2[0];
+    this.advancedSources = JSON.parse(JSON.stringify(profile?.sources ?? []));
+    this.advancedAppTitleSourceId = profile?.app_title_source_id ?? null;
+    this.advancedBrowserFocusSourceId = profile?.browser_focus_source_id ?? null;
     this.loadedSourcesJson = JSON.stringify(this.advancedSources);
+    this.loadedPresentationJson = JSON.stringify({
+      sources: this.advancedSources,
+      app_title_source_id: this.advancedAppTitleSourceId,
+      browser_focus_source_id: this.advancedBrowserFocusSourceId,
+    });
     this.categoryStore.load();
     window.addEventListener('beforeunload', this.beforeUnload);
 
@@ -462,11 +531,25 @@ export default {
         return;
       }
       try {
-        await this.categoryStore.save(this.advancedSourcesDirty ? this.advancedSources : undefined);
-        this.advancedSources = JSON.parse(
-          JSON.stringify(this.settingsStore.rulesV2.activity_profiles_v2[0]?.sources ?? [])
+        await this.categoryStore.save(
+          this.advancedSourcesDirty ? this.advancedSources : undefined,
+          this.advancedSourcesDirty
+            ? {
+                app_title_source_id: this.advancedAppTitleSourceId ?? undefined,
+                browser_focus_source_id: this.advancedBrowserFocusSourceId ?? undefined,
+              }
+            : undefined
         );
+        const profile = this.settingsStore.rulesV2.activity_profiles_v2[0];
+        this.advancedSources = JSON.parse(JSON.stringify(profile?.sources ?? []));
+        this.advancedAppTitleSourceId = profile?.app_title_source_id ?? null;
+        this.advancedBrowserFocusSourceId = profile?.browser_focus_source_id ?? null;
         this.loadedSourcesJson = JSON.stringify(this.advancedSources);
+        this.loadedPresentationJson = JSON.stringify({
+          sources: this.advancedSources,
+          app_title_source_id: this.advancedAppTitleSourceId,
+          browser_focus_source_id: this.advancedBrowserFocusSourceId,
+        });
         this.sourceValidationAttempted = false;
       } catch (error) {
         this.categorySaveError = error instanceof Error ? error.message : String(error);
@@ -474,10 +557,16 @@ export default {
     },
     resetChanges: async function () {
       await this.categoryStore.load();
-      this.advancedSources = JSON.parse(
-        JSON.stringify(this.settingsStore.rulesV2.activity_profiles_v2[0]?.sources ?? [])
-      );
+      const profile = this.settingsStore.rulesV2.activity_profiles_v2[0];
+      this.advancedSources = JSON.parse(JSON.stringify(profile?.sources ?? []));
+      this.advancedAppTitleSourceId = profile?.app_title_source_id ?? null;
+      this.advancedBrowserFocusSourceId = profile?.browser_focus_source_id ?? null;
       this.loadedSourcesJson = JSON.stringify(this.advancedSources);
+      this.loadedPresentationJson = JSON.stringify({
+        sources: this.advancedSources,
+        app_title_source_id: this.advancedAppTitleSourceId,
+        browser_focus_source_id: this.advancedBrowserFocusSourceId,
+      });
       this.sourceValidationAttempted = false;
     },
     restoreDefaultClasses: async function () {
@@ -530,7 +619,7 @@ export default {
           import_obj.category_sets_v2.length > 0
         ) {
           const imported = resolveRulesV2Settings({
-            activity_profiles_v2: import_obj.activity_profiles_v2,
+            activity_profiles_v2: initializeProfileSourceDefaults(import_obj.activity_profiles_v2),
             category_sets_v2: import_obj.category_sets_v2,
             classes: this.categoryStore.classes_clean,
             always_active_pattern: this.settingsStore.always_active_pattern,
@@ -549,6 +638,10 @@ export default {
           this.advancedSources = JSON.parse(
             JSON.stringify(imported.activity_profiles_v2[0].sources)
           );
+          this.advancedAppTitleSourceId =
+            imported.activity_profiles_v2[0].app_title_source_id ?? null;
+          this.advancedBrowserFocusSourceId =
+            imported.activity_profiles_v2[0].browser_focus_source_id ?? null;
         } else if (Array.isArray(import_obj.categories)) {
           this.categoryStore.import(import_obj.categories);
         } else {

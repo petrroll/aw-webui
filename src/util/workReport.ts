@@ -7,12 +7,7 @@ import {
   queryStringToArray,
 } from '~/queries';
 import type { CompiledActivityQueryV2, CompiledProfileQueryOptions } from '~/util/rulesV2';
-import {
-  hostCanResolveProfile,
-  hostHasResolvedActivity,
-  hostHasResolvedActivityV2,
-  hostHasResolvedActiveTimeV2,
-} from '~/util/activityProfile';
+import { hostHasResolvedActivityV2, hostHasResolvedActiveTimeV2 } from '~/util/activityProfile';
 
 export interface WorkReportHostOption {
   value: string;
@@ -22,23 +17,21 @@ export interface WorkReportHostOption {
 
 function getProfileHosts(
   buckets: IBucket[],
-  compiled?: CompiledProfileQueryOptions,
+  _compiled?: CompiledProfileQueryOptions,
   compiledV2?: CompiledActivityQueryV2
 ): string[] {
   const hosts = buckets
     .map(bucket => bucket.hostname || bucket.data?.hostname)
     .filter((host): host is string => !!host && host !== 'unknown');
   return [...new Set(hosts)].filter(host =>
-    compiledV2
-      ? hostHasResolvedActivityV2(host, buckets, compiledV2)
-      : hostHasResolvedActivity(host, buckets, compiled)
+    compiledV2 ? hostHasResolvedActivityV2(host, buckets, compiledV2) : false
   );
 }
 
 function hostCanResolveWorkReport(
   host: string,
   buckets: IBucket[],
-  compiled?: CompiledProfileQueryOptions,
+  _compiled?: CompiledProfileQueryOptions,
   compiledV2?: CompiledActivityQueryV2,
   includeAudible?: boolean
 ): boolean {
@@ -64,7 +57,7 @@ function hostCanResolveWorkReport(
           includeAudible,
           browserBucketIds,
         })
-    : hostCanResolveProfile({ host, buckets, compiled, filterAfk: true });
+    : false;
 }
 
 export function getWorkReportHostOptions(

@@ -1,5 +1,6 @@
 import {
   buildWorkReportQuery,
+  buildWorkReportQueryV2,
   getSupportedWorkReportHosts,
   getUnsupportedWorkReportHosts,
   getWorkReportHostOptions,
@@ -47,19 +48,19 @@ describe('workReport host helpers', () => {
     always_active_pattern: '',
   });
 
-  test('getWorkReportHostOptions disables hosts without active-time sources', () => {
-    expect(getWorkReportHostOptions(buckets as any)).toEqual([
-      { value: 'laptop', text: 'laptop', disabled: false },
-      { value: 'phone', text: 'phone (requires an active-time source)', disabled: true },
+  test('getWorkReportHostOptions does not expose legacy-only hosts', () => {
+    expect(getWorkReportHostOptions(buckets as any)).toEqual([]);
+  });
+
+  test('getUnsupportedWorkReportHosts rejects legacy-only hosts', () => {
+    expect(getUnsupportedWorkReportHosts(['laptop', 'phone'], buckets as any)).toEqual([
+      'laptop',
+      'phone',
     ]);
   });
 
-  test('getUnsupportedWorkReportHosts returns selected hosts missing AFK buckets', () => {
-    expect(getUnsupportedWorkReportHosts(['laptop', 'phone'], buckets as any)).toEqual(['phone']);
-  });
-
-  test('getSupportedWorkReportHosts returns only hosts with AFK buckets', () => {
-    expect(getSupportedWorkReportHosts(['laptop', 'phone'], buckets as any)).toEqual(['laptop']);
+  test('getSupportedWorkReportHosts returns no legacy-only hosts', () => {
+    expect(getSupportedWorkReportHosts(['laptop', 'phone'], buckets as any)).toEqual([]);
   });
 
   test('buildWorkReportQuery resolves the legacy profile through canonical host queries', () => {
@@ -105,9 +106,9 @@ describe('workReport host helpers', () => {
       },
     ];
 
-    expect(getSupportedWorkReportHosts(['desktop', 'phone', 'laptop'], moreBuckets as any)).toEqual(
-      ['desktop', 'laptop']
-    );
+    expect(
+      getSupportedWorkReportHosts(['desktop', 'phone', 'laptop'], moreBuckets as any)
+    ).toEqual([]);
   });
 
   test('supports a host resolved entirely from configured generic sources', () => {
@@ -127,19 +128,18 @@ describe('workReport host helpers', () => {
         data: {},
       },
     ];
-    const compiled = {
+    const compiledV2 = {
       category_specs: [],
       context_sources: [],
-      activity_sources: [
+      activity_coverage_sources: [
         {
           source_id: 'activity',
           bucket_ids: ['custom-activity'],
           scope: 'host' as const,
           bucket_hosts: { 'custom-activity': 'custom' },
-          field_mappings: {},
+          fields: ['name'],
         },
       ],
-      background_sources: [],
       active_time_rule: {
         type: 'regex' as const,
         source: 'active',
@@ -156,25 +156,17 @@ describe('workReport host helpers', () => {
       ],
       capabilities: [
         'query.categorize_v2.v1',
-        'query.map_event_fields.v1',
+        'query.merge_subwatcher_fields.source_namespace.v1',
         'query.active_periods_v2.v1',
       ],
     };
 
-    expect(getWorkReportHostOptions(genericBuckets as any, compiled)).toEqual([
+    expect(getWorkReportHostOptions(genericBuckets as any, undefined, compiledV2)).toEqual([
       { value: 'custom', text: 'custom', disabled: false },
     ]);
 
-    const query = buildWorkReportQuery(
-      {
-        hosts: ['custom'],
-        host_params: { custom: { bid_window: undefined, bid_afk: undefined } },
-        filter_afk: true,
-        categories: [],
-        filter_categories: [],
-        always_active_pattern: '',
-        ...compiled,
-      },
+    const query = buildWorkReportQueryV2(
+      [{ ...compiledV2, hostname: 'custom', filter_categories: [] }],
       []
     );
     expect(query).toContain('query_bucket_optional("custom-activity")');

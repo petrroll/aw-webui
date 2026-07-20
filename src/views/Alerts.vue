@@ -61,7 +61,7 @@ div
 import _ from 'lodash';
 import moment from 'moment';
 import { resolveActivityEventsQuery } from '~/util/activityQuery';
-import { hostCanResolveProfile } from '~/util/activityProfile';
+import { hostHasResolvedActivityV2, hostHasResolvedActiveTimeV2 } from '~/util/activityProfile';
 
 import 'vue-awesome/icons/plus';
 import 'vue-awesome/icons/check';
@@ -123,15 +123,21 @@ export default {
   mounted: async function () {
     await this.bucketsStore.ensureLoaded();
     await this.categoryStore.load();
-    const advanced = useSettingsStore().compiledRulesV2;
-    this.hostnames = this.bucketsStore.hosts.filter(host =>
-      hostCanResolveProfile({
-        host,
-        buckets: this.bucketsStore.buckets,
-        compiled: advanced,
-        filterAfk: this.filter_afk,
-      })
-    );
+    const settingsStore = useSettingsStore();
+    const compiledV2 = settingsStore.compiledActivityQueryV2;
+    const activeTime = settingsStore.rulesV2.activity_profiles_v2[0]?.active_time;
+    this.hostnames = compiledV2
+      ? this.bucketsStore.hosts.filter(
+          host =>
+            hostHasResolvedActivityV2(host, this.bucketsStore.buckets, compiledV2) &&
+            (!this.filter_afk ||
+              hostHasResolvedActiveTimeV2(host, this.bucketsStore.buckets, compiledV2, {
+                includeAudible:
+                  activeTime?.type === 'legacy' ? activeTime.include_audible : undefined,
+                browserBucketIds: this.bucketsStore.bucketsBrowser(host),
+              }))
+        )
+      : [];
     this.hostname = this.hostnames[0];
   },
   methods: {
@@ -160,18 +166,10 @@ export default {
     check: async function () {
       const { query: query_array } = resolveActivityEventsQuery({
         host: this.hostname,
+        filter_afk: this.filter_afk,
         v2: {
           filter_afk: this.filter_afk,
           filter_categories: null,
-        },
-        legacyParams: {
-          hostname: this.hostname,
-          bid_window: this.bucketsStore.bucketsWindow(this.hostname)[0],
-          bid_afk: this.bucketsStore.bucketsAFK(this.hostname)[0],
-          filter_afk: this.filter_afk,
-          categories: useCategoryStore().classes_for_query,
-          filter_categories: null, // classes.map(c => c[0]),
-          ...useSettingsStore().compiledRulesV2,
         },
       });
 

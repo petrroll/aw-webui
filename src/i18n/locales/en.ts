@@ -254,7 +254,7 @@ export default {
       profileUnavailable: 'No activity profile is available.',
       ruleUnknownSource: 'This rule references an unavailable source: {source}.',
       advancedRulesNotApplied:
-        'Advanced rules are not being applied because this server lacks required flexible-rules support. Basic results are shown instead.',
+        "This server doesn't support the flexible activity model these dashboards need. Update your ActivityWatch server to see reports.",
       openRulesSettings: 'Open rules settings.',
       noResolvedActivityHost: 'No device currently has enough watcher data to resolve activity.',
       activitySetupHelp:
@@ -289,6 +289,17 @@ export default {
       sourceCreatesActivityEnabled: 'Can create activity periods',
       sourceCreatesActivityHelp:
         'This profile-wide setting lets this watcher count as tracked activity in every report. Rules can reference it either way, and overlapping sources coexist.',
+      sourceKeepsActiveEnabled: 'Counts as active even while AFK',
+      sourceKeepsActiveHelp:
+        'Time from this source remains active when AFK time is filtered. This is enabled by default for Stopwatch.',
+      activeTimeUnavailable: 'This server cannot apply configurable active-time rules.',
+      appTitleReportSource: 'App & title report source',
+      appTitleReportSourceHelp:
+        'Select the source used for App and Title breakdowns. The default is App & window.',
+      browserFocusSource: 'Browser focus source',
+      browserFocusSourceHelp:
+        'Select the source whose app field determines browser focus. The default is App & window.',
+      presentationSourceNone: 'None',
       activityCoverageUnavailable:
         'This server cannot create activity periods from custom sources.',
       sourceInternalId: 'Internal ID',

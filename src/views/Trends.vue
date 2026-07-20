@@ -360,26 +360,16 @@ export default {
     },
 
     buildCategoryQuery(): string[] {
-      const cats = this.categoryStore.classes_for_query;
       const returnStatement = `
         cat_events = sort_by_duration(merge_events_by_keys(events, ["$category"]));
         RETURN = {"cat_events": cat_events};
       `;
       const { query } = resolveActivityEventsQuery({
         host: this.host,
+        filter_afk: true,
         v2: {
           filter_afk: true,
           filter_categories: null,
-        },
-        legacyParams: {
-          hostname: this.host,
-          bid_window: this.bucketsStore.bucketsWindow(this.host)[0],
-          bid_afk: this.bucketsStore.bucketsAFK(this.host)[0],
-          filter_afk: true,
-          categories: cats,
-          filter_categories: null,
-          always_active_pattern: this.settingsStore.always_active_pattern || undefined,
-          ...this.settingsStore.compiledRulesV2,
         },
         returnStatement,
       });

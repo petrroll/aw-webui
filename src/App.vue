@@ -4,7 +4,7 @@ div#wrapper(v-if="loaded")
 
   div(:class="{'container': !fullContainer, 'container-fluid': fullContainer}").px-0.px-md-2
     div.aw-container.my-sm-3.p-3
-      b-alert(v-if="advancedRulesUnsupported" show variant="warning")
+      b-alert(v-if="activityV2Unsupported" show variant="warning")
         | {{ $t('settings.categorization.advancedRulesNotApplied') }}
         router-link.ml-1(to="/settings")
           | {{ $t('settings.categorization.openRulesSettings') }}
@@ -37,12 +37,11 @@ export default {
     fullContainer() {
       return this.$route.meta.fullContainer;
     },
-    advancedRulesUnsupported() {
-      if (this.$route.path.startsWith('/settings')) return false;
+    activityV2Unsupported() {
       const serverStore = useServerStore();
       if (!serverStore.info) return false;
       const settingsStore = useSettingsStore();
-      return settingsStore.hasAdvancedRulesV2 && !settingsStore.compiledRulesV2;
+      return settingsStore.activityV2Unsupported;
     },
   },
 

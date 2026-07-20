@@ -139,6 +139,7 @@ describe('v2 clean resolver — window is an ordinary source', () => {
       buckets: [stopwatchBucket],
       host,
       includeStopwatch: true,
+      filterAfk: true,
     });
     expect(params.activity_coverage_sources.map(s => s.source_id)).toEqual(['stopwatch']);
     expect(
@@ -150,6 +151,12 @@ describe('v2 clean resolver — window is an ordinary source', () => {
     const query = resolveActivityProfileV2(params);
     expect(query).not.toContain('aw-watcher-window');
     expect(query).toContain('aw-stopwatch_workstation');
+    expect(query).toContain(
+      'not_afk = period_union(not_afk, activity_coverage_period_0);'
+    );
+    expect(query.indexOf('period_union(not_afk')).toBeLessThan(
+      query.indexOf('filter_period_intersect(events, not_afk)')
+    );
     // Namespaced under a source id, not bid_stopwatch.
     expect(query).toContain('"source_id":"stopwatch"');
     expect(query).not.toContain('bid_stopwatch');

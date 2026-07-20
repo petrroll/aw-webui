@@ -137,13 +137,6 @@ export default {
       const settingsStore = useSettingsStore();
       const compiled = settingsStore.compiledRulesV2;
       const customRule = this.filterCategories.find(category => category[0][0] === 'searched');
-      const customRegex = customRule
-        ? {
-            type: 'regex' as const,
-            regex: customRule[1].regex,
-            ignore_case: customRule[1].ignore_case,
-          }
-        : undefined;
       const profileSources = settingsStore.rulesV2.activity_profiles_v2[0]?.sources ?? [];
       const searchableSources = profileSources.filter(source => source.builtin !== 'window');
       const coverageSourceIds = new Set(
@@ -182,6 +175,7 @@ export default {
         : undefined;
       const { query: query_array } = resolveActivityEventsQuery({
         host: this.queryOptions.hostname,
+        filter_afk: this.queryOptions.filter_afk,
         v2: {
           filter_afk: this.queryOptions.filter_afk,
           filter_categories: this.filterCategories.map(c => c[0]),
@@ -189,39 +183,6 @@ export default {
             ? [{ id: 'report-search', name: ['searched'], rule: v2SearchRule }]
             : undefined,
           extra_context_sources: customRule ? reportContextSources : undefined,
-        },
-        legacyParams: {
-          hostname: this.queryOptions.hostname,
-          bid_window: this.bucketsStore.bucketsWindow(this.queryOptions.hostname)[0],
-          bid_afk: this.bucketsStore.bucketsAFK(this.queryOptions.hostname)[0],
-          filter_afk: this.queryOptions.filter_afk,
-          categories: this.filterCategories,
-          filter_categories: this.filterCategories.map(c => c[0]),
-          ...(compiled ?? {}),
-          ...(customRule && compiled
-            ? {
-                context_sources: reportContextSources,
-                category_specs: [
-                  {
-                    id: 'report-search',
-                    name: ['searched'],
-                    rule:
-                      searchableSourceIds.length > 0
-                        ? {
-                            type: 'any',
-                            rules: [
-                              customRegex,
-                              ...searchableSourceIds.map(source => ({
-                                ...customRegex,
-                                source,
-                              })),
-                            ],
-                          }
-                        : customRegex,
-                  },
-                ],
-              }
-            : {}),
         },
       });
       const start = moment(this.queryOptions.start).format();

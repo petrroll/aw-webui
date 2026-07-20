@@ -97,7 +97,6 @@ import {
   getSupportedWorkReportHosts,
   getWorkReportHostOptions,
   getUnsupportedWorkReportHosts,
-  buildWorkReportQuery,
   buildWorkReportQueryV2,
 } from '~/util/workReport';
 import { materializeHostsV2 } from '~/util/activityQuery';
@@ -315,45 +314,21 @@ export default {
         }
         const categoriesFilter = expanded;
 
-        const categories = this.categoryStore.classes_for_query;
         const activeTime = this.settingsStore.rulesV2.activity_profiles_v2[0]?.active_time;
 
-        // Capable servers: source-only v2 work report (no bid_window / bid_afk /
-        // always_active_pattern). Old-server/custom setups use legacy path.
+        // Source-only v2 work report (no bid_window / bid_afk /
+        // always_active_pattern). Unsupported servers do not substitute legacy results.
         const perHostV2 = materializeHostsV2(hostsToQuery, {
           filter_afk: true,
           filter_categories: categoriesFilter,
           include_audible: activeTime?.type === 'legacy' ? activeTime.include_audible : undefined,
         });
-        let query: string;
-        if (perHostV2) {
-          query = buildWorkReportQueryV2(perHostV2, categoriesFilter);
-        } else {
-          const hostParams = Object.fromEntries(
-            hostsToQuery.map(host => [
-              host,
-              {
-                bid_window: this.bucketsStore.bucketsWindow(host)[0],
-                bid_afk: this.bucketsStore.bucketsAFK(host)[0],
-                bid_browsers: this.bucketsStore.bucketsBrowser(host),
-              },
-            ])
-          );
-          query = buildWorkReportQuery(
-            {
-              hosts: hostsToQuery,
-              host_params: hostParams,
-              filter_afk: true,
-              categories,
-              filter_categories: categoriesFilter,
-              always_active_pattern: this.settingsStore.always_active_pattern,
-              include_audible:
-                activeTime?.type === 'legacy' ? activeTime.include_audible : undefined,
-              ...this.settingsStore.compiledRulesV2,
-            },
-            categoriesFilter
+        if (!perHostV2) {
+          throw new Error(
+            "This server doesn't support the flexible activity model this dashboard needs."
           );
         }
+        const query = buildWorkReportQueryV2(perHostV2, categoriesFilter);
 
         const results = await client.query(timeperiods, [query]);
 

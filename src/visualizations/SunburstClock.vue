@@ -106,7 +106,6 @@ import moment from 'moment';
 import _ from 'lodash';
 import { getClient } from '~/util/awclient';
 import { useBucketsStore } from '~/stores/buckets';
-import { useCategoryStore } from '~/stores/categories';
 import { useSettingsStore } from '~/stores/settings';
 import { serializeQueryJson } from '~/queries';
 import { resolveActivityEventsQuery } from '~/util/activityQuery';
@@ -145,7 +144,6 @@ export default {
     resolvedEvents: async function () {
       const bucketsStore = useBucketsStore();
       const settingsStore = useSettingsStore();
-      const categoryStore = useCategoryStore();
       const activeTime = settingsStore.rulesV2.activity_profiles_v2[0]?.active_time;
       const afkBucket =
         activeTime?.type === 'legacy' ? bucketsStore.bucketsAFK(this.host)[0] : undefined;
@@ -156,22 +154,11 @@ export default {
         '\nRETURN = {"activity": events, "active": not_afk, "afk": afk_status};';
       const { query } = resolveActivityEventsQuery({
         host: this.host,
+        filter_afk: false,
         v2: {
           filter_afk: false,
           filter_categories: null,
           include_audible: activeTime?.type === 'legacy' ? activeTime.include_audible : undefined,
-        },
-        legacyParams: {
-          hostname: this.host,
-          bid_window: bucketsStore.bucketsWindow(this.host)[0],
-          bid_afk: bucketsStore.bucketsAFK(this.host)[0],
-          bid_browsers: bucketsStore.bucketsBrowser(this.host),
-          filter_afk: false,
-          include_audible: activeTime?.type === 'legacy' ? activeTime.include_audible : undefined,
-          always_active_pattern: settingsStore.always_active_pattern || undefined,
-          categories: categoryStore.classes_for_query,
-          filter_categories: null,
-          ...settingsStore.compiledRulesV2,
         },
         returnStatement,
       });

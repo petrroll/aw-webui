@@ -2,7 +2,7 @@ import type { Category } from '~/util/classes';
 import { validateRegex } from '~/util/validate';
 
 export const RULES_SCHEMA_VERSION = 2 as const;
-export const SOURCE_DEFAULTS_VERSION = 2;
+export const SOURCE_DEFAULTS_VERSION = 3;
 export const MAX_EXPRESSION_DEPTH = 32;
 export const MAX_EXPRESSION_NODES = 4096;
 export const MAX_REGEX_LENGTH = 4096;
@@ -67,6 +67,7 @@ export interface SourceDefinitionV2 {
   field_types?: Record<string, 'string' | 'scalar'>;
   auto_generated?: boolean;
   creates_activity?: boolean;
+  keeps_active?: boolean;
   /** @deprecated Migrated to creates_activity when settings are loaded. */
   activity_mode?: 'replace' | 'fill-gaps';
   /** @deprecated Migrated to creates_activity when settings are loaded. */
@@ -100,6 +101,8 @@ export interface ActivityProfileV2 {
   id: string;
   category_set_ids: string[];
   sources: SourceDefinitionV2[];
+  app_title_source_id?: string;
+  browser_focus_source_id?: string;
   active_time: ActiveTimeLegacyV2 | ActiveTimeExpressionV2;
 }
 
@@ -172,6 +175,7 @@ export interface CompiledCoverageSourceV2 {
   scope?: 'host' | 'global';
   bucket_hosts?: Record<string, string>;
   fields: string[];
+  keeps_active?: boolean;
   host?: string;
 }
 
@@ -206,6 +210,8 @@ export interface CompiledActivityQueryV2 {
   activity_coverage_sources: CompiledCoverageSourceV2[];
   active_time_rule?: RuleExpressionV2;
   active_time_sources: CompiledActiveSourceV2[];
+  app_title_source_id?: string;
+  browser_focus_source_id?: string;
   /**
    * Present when the profile keeps legacy active-time settings. Materialization
    * synthesizes an explicit AFK source/rule (and optional window always-active
@@ -244,6 +250,7 @@ export function defaultBuiltinStopwatchSource(): SourceDefinitionV2 {
     builtin: 'stopwatch',
     fields: ['label'],
     creates_activity: true,
+    keeps_active: true,
   };
 }
 
@@ -259,21 +266,34 @@ export function initializeProfileSourceDefaults(
   profiles: ActivityProfileV2[]
 ): ActivityProfileV2[] {
   return profiles.map(profile => {
-    if ((profile.source_defaults_version ?? 0) >= SOURCE_DEFAULTS_VERSION) return profile;
-    const sources = [...profile.sources];
-    if (!sources.some(source => source.builtin === 'window')) {
-      sources.unshift(defaultBuiltinWindowSource());
+    const currentVersion = profile.source_defaults_version ?? 0;
+    if (currentVersion >= SOURCE_DEFAULTS_VERSION) return profile;
+    const sources = profile.sources.map(source => ({ ...source }));
+    if (currentVersion < 2) {
+      if (!sources.some(source => source.builtin === 'window')) {
+        sources.unshift(defaultBuiltinWindowSource());
+      }
+      if (!sources.some(source => source.id === BUILTIN_BROWSER_SOURCE_ID)) {
+        sources.push(defaultBuiltinBrowserSource());
+      }
+      if (!sources.some(source => source.id === BUILTIN_STOPWATCH_SOURCE_ID)) {
+        sources.push(defaultBuiltinStopwatchSource());
+      }
     }
-    if (!sources.some(source => source.id === BUILTIN_BROWSER_SOURCE_ID)) {
-      sources.push(defaultBuiltinBrowserSource());
-    }
-    if (!sources.some(source => source.id === BUILTIN_STOPWATCH_SOURCE_ID)) {
-      sources.push(defaultBuiltinStopwatchSource());
+    if (currentVersion < 3) {
+      const stopwatch = sources.find(
+        source => source.builtin === 'stopwatch' || source.id === BUILTIN_STOPWATCH_SOURCE_ID
+      );
+      if (stopwatch?.creates_activity && stopwatch.keeps_active === undefined) {
+        stopwatch.keeps_active = true;
+      }
     }
     return {
       ...profile,
       source_defaults_version: SOURCE_DEFAULTS_VERSION,
       sources,
+      app_title_source_id: profile.app_title_source_id ?? BUILTIN_WINDOW_SOURCE_ID,
+      browser_focus_source_id: profile.browser_focus_source_id ?? BUILTIN_WINDOW_SOURCE_ID,
     };
   });
 }
@@ -481,6 +501,8 @@ export function migrateLegacySettings(input: {
         id: 'default',
         category_set_ids: ['default'],
         sources: defaultBuiltinSources(),
+        app_title_source_id: BUILTIN_WINDOW_SOURCE_ID,
+        browser_focus_source_id: BUILTIN_WINDOW_SOURCE_ID,
         active_time: {
           type: 'legacy',
           use_afk: true,
@@ -581,6 +603,8 @@ export function inferRulesEditorMode(
     profile.sources.every(isDefaultBuiltinSource);
   if (
     !hasEveryDefaultSource ||
+    profile.app_title_source_id !== BUILTIN_WINDOW_SOURCE_ID ||
+    profile.browser_focus_source_id !== BUILTIN_WINDOW_SOURCE_ID ||
     profile.active_time.type === 'expression' ||
     categorySet.categories.some(category => category.simple_ui !== true)
   ) {
@@ -687,6 +711,8 @@ export function applyRulesSimplification(input: {
     source_defaults_version: SOURCE_DEFAULTS_VERSION,
     category_set_ids: [categorySet.id],
     sources: defaultBuiltinSources(),
+    app_title_source_id: BUILTIN_WINDOW_SOURCE_ID,
+    browser_focus_source_id: BUILTIN_WINDOW_SOURCE_ID,
     active_time: {
       type: 'legacy',
       use_afk: true,
@@ -863,6 +889,12 @@ export function validateActivityProfile(
     if (source.creates_activity !== undefined && typeof source.creates_activity !== 'boolean') {
       errors.push(`sources[${index}].creates_activity must be boolean`);
     }
+    if (source.keeps_active !== undefined && typeof source.keeps_active !== 'boolean') {
+      errors.push(`sources[${index}].keeps_active must be boolean`);
+    }
+    if (source.keeps_active && !source.creates_activity) {
+      errors.push(`sources[${index}].keeps_active requires creates_activity`);
+    }
     if (source.host !== undefined && !source.host) {
       errors.push(`sources[${index}].host must be non-empty`);
     }
@@ -903,6 +935,18 @@ export function validateActivityProfile(
         }
       }
     }
+  }
+  if (
+    profile.app_title_source_id !== undefined &&
+    typeof profile.app_title_source_id !== 'string'
+  ) {
+    errors.push('app_title_source_id must be a string');
+  }
+  if (
+    profile.browser_focus_source_id !== undefined &&
+    typeof profile.browser_focus_source_id !== 'string'
+  ) {
+    errors.push('browser_focus_source_id must be a string');
   }
   if (profile.active_time.type === 'expression') {
     errors.push(...validateRuleExpression(profile.active_time.rule, 'active_time.rule'));
@@ -1146,6 +1190,11 @@ export function compileActivityQueryV2(
   const categorySourceIds = new Set(
     category_specs.flatMap(category => [...collectRuleSourceIds(category.rule)])
   );
+  const presentationSourceIds = new Set(
+    [profile.app_title_source_id, profile.browser_focus_source_id].filter(
+      (sourceId): sourceId is string => !!sourceId
+    )
+  );
 
   const activity_coverage_sources: CompiledCoverageSourceV2[] = [];
   const context_sources: CompiledContextSourceV2[] = [];
@@ -1163,8 +1212,12 @@ export function compileActivityQueryV2(
           builtin: 'window',
           ...location,
           fields: [...source.fields],
+          ...(source.keeps_active ? { keeps_active: true } : {}),
         });
-      } else if (categorySourceIds.has(BUILTIN_WINDOW_SOURCE_ID)) {
+      } else if (
+        categorySourceIds.has(BUILTIN_WINDOW_SOURCE_ID) ||
+        presentationSourceIds.has(BUILTIN_WINDOW_SOURCE_ID)
+      ) {
         context_sources.push({
           source_id: BUILTIN_WINDOW_SOURCE_ID,
           builtin: 'window',
@@ -1187,8 +1240,9 @@ export function compileActivityQueryV2(
         source_id: source.id,
         ...location,
         fields: [...source.fields],
+        ...(source.keeps_active ? { keeps_active: true } : {}),
       });
-    } else if (categorySourceIds.has(source.id)) {
+    } else if (categorySourceIds.has(source.id) || presentationSourceIds.has(source.id)) {
       context_sources.push({
         source_id: source.id,
         ...location,
@@ -1214,6 +1268,8 @@ export function compileActivityQueryV2(
     context_sources,
     activity_coverage_sources,
     active_time_sources: [],
+    app_title_source_id: profile.app_title_source_id,
+    browser_focus_source_id: profile.browser_focus_source_id,
     capabilities: [...capabilities],
   };
 

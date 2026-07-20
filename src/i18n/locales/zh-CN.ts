@@ -226,7 +226,7 @@ export default {
       profileUnavailable: '没有可用的活动配置。',
       ruleUnknownSource: '此规则引用了不可用的数据源：{source}。',
       advancedRulesNotApplied:
-        '服务器缺少所需的灵活规则支持，因此高级规则当前未应用，显示的是基础结果。',
+        '此服务器不支持这些仪表板所需的灵活活动模型。请更新 ActivityWatch 服务器以查看报告。',
       openRulesSettings: '打开规则设置。',
       noResolvedActivityHost: '当前没有设备具备足够的监视器数据来解析活动。',
       activitySetupHelp: '请启动可产生活动的监视器，或配置一个可创建活动时间段的数据源。',
@@ -257,6 +257,14 @@ export default {
       sourceCreatesActivityEnabled: '可创建活动时间段',
       sourceCreatesActivityHelp:
         '这是整个配置文件范围的设置，可让此监视器的数据在所有报告中计为活动。规则无论如何都可引用它，重叠的数据源会同时保留。',
+      sourceKeepsActiveEnabled: '即使处于 AFK 也计为活动',
+      sourceKeepsActiveHelp: '过滤 AFK 时间时，此数据源的时间仍保持活动状态。秒表默认启用此选项。',
+      activeTimeUnavailable: '此服务器无法应用可配置的活动时间规则。',
+      appTitleReportSource: '应用与标题报告数据源',
+      appTitleReportSourceHelp: '选择用于应用和标题明细的数据源。默认为“应用与窗口”。',
+      browserFocusSource: '浏览器焦点数据源',
+      browserFocusSourceHelp: '选择以 app 字段确定浏览器焦点的数据源。默认为“应用与窗口”。',
+      presentationSourceNone: '无',
       activityCoverageUnavailable: '此服务器无法从自定义数据源创建活动时间段。',
       sourceInternalId: '内部 ID',
       sourceBucketIds: '监视器存储桶',

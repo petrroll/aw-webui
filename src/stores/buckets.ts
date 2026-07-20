@@ -5,7 +5,7 @@ import { defineStore } from 'pinia';
 import { getClient } from '~/util/awclient';
 import { useServerStore } from '~/stores/server';
 import { useSettingsStore } from '~/stores/settings';
-import { hostCanResolveProfile, hostHasResolvedActivity } from '~/util/activityProfile';
+import { hostHasResolvedActivityV2, hostHasResolvedActiveTimeV2 } from '~/util/activityProfile';
 
 function select_buckets(
   buckets: IBucket[],
@@ -37,18 +37,21 @@ export const useBucketsStore = defineStore('buckets', {
       // Prefer the local device, then hosts resolvable by the configured
       // activity profile, then the most recently updated hosts.
       const serverStore = useServerStore();
-      const compiled = useSettingsStore().compiledRulesV2;
+      const settingsStore = useSettingsStore();
+      const compiledV2 = settingsStore.compiledActivityQueryV2;
+      const activeTime = settingsStore.rulesV2.activity_profiles_v2[0]?.active_time;
       const selfHost = serverStore.info && serverStore.info.hostname;
       hosts = _.orderBy(
         hosts,
         [
           host => (host && host === selfHost ? 1 : 0),
           host =>
-            hostCanResolveProfile({
-              host,
-              buckets: state.buckets,
-              compiled,
-              filterAfk: true,
+            compiledV2 &&
+            hostHasResolvedActivityV2(host, state.buckets, compiledV2) &&
+            hostHasResolvedActiveTimeV2(host, state.buckets, compiledV2, {
+              includeAudible:
+                activeTime?.type === 'legacy' ? activeTime.include_audible : undefined,
+              browserBucketIds: this.bucketsBrowser(host),
             })
               ? 1
               : 0,
@@ -73,13 +76,19 @@ export const useBucketsStore = defineStore('buckets', {
       stopwatch: boolean;
     } {
       return hostname => {
-        const compiled = useSettingsStore().compiledRulesV2;
-        const windowAvail = hostCanResolveProfile({
-          host: hostname,
-          buckets: state.buckets,
-          compiled,
-          filterAfk: true,
-        });
+        const settingsStore = useSettingsStore();
+        const compiledV2 = settingsStore.compiledActivityQueryV2;
+        const activeTime = settingsStore.rulesV2.activity_profiles_v2[0]?.active_time;
+        const activityAvail = compiledV2
+          ? hostHasResolvedActivityV2(hostname, state.buckets, compiledV2)
+          : false;
+        const windowAvail =
+          activityAvail &&
+          !!compiledV2 &&
+          hostHasResolvedActiveTimeV2(hostname, state.buckets, compiledV2, {
+            includeAudible: activeTime?.type === 'legacy' ? activeTime.include_audible : undefined,
+            browserBucketIds: this.bucketsBrowser(hostname),
+          });
         const androidAvail = this.bucketsAndroid(hostname).length > 0;
 
         return {
@@ -87,7 +96,7 @@ export const useBucketsStore = defineStore('buckets', {
           browser: windowAvail && this.bucketsBrowser(hostname).length > 0,
           editor: this.bucketsEditor(hostname).length > 0,
           android: androidAvail,
-          category: hostHasResolvedActivity(hostname, state.buckets, compiled) || androidAvail,
+          category: activityAvail || androidAvail,
           stopwatch: this.bucketsStopwatch(hostname).length > 0,
         };
       };

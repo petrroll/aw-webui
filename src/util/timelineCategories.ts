@@ -5,9 +5,8 @@ import {
   categorySetToLegacyClasses,
   type CategorySetV2,
   type CompiledActivityQueryV2,
-  type CompiledProfileQueryOptions,
 } from '~/util/rulesV2';
-import { hostCanResolveProfile, hostHasResolvedActivityV2 } from '~/util/activityProfile';
+import { hostHasResolvedActivityV2 } from '~/util/activityProfile';
 import type { IBucket } from '~/util/interfaces';
 
 interface Interval {
@@ -31,16 +30,10 @@ export function hostCanResolveTimelineCategory(input: {
   host: string;
   buckets: IBucket[];
   compiledV2?: CompiledActivityQueryV2;
-  compiledLegacy?: CompiledProfileQueryOptions;
 }): boolean {
   return input.compiledV2
     ? hostHasResolvedActivityV2(input.host, input.buckets, input.compiledV2)
-    : hostCanResolveProfile({
-        host: input.host,
-        buckets: input.buckets,
-        compiled: input.compiledLegacy,
-        filterAfk: false,
-      });
+    : false;
 }
 
 export function buildTimelineCategoryQuery(canonicalQuery: string): string {

@@ -37,6 +37,11 @@ interface PendingV2Delete {
   name: string[];
 }
 
+export interface ProfilePresentationV2 {
+  app_title_source_id?: string;
+  browser_focus_source_id?: string;
+}
+
 interface State {
   classes: Category[];
   classes_unsaved_changes: boolean;
@@ -228,7 +233,11 @@ export const useCategoryStore = defineStore('categories', {
       this.replace_v2_rules_on_save = false;
     },
 
-    async save(this: State, sourceSnapshot?: SourceDefinitionV2[]) {
+    async save(
+      this: State,
+      sourceSnapshot?: SourceDefinitionV2[],
+      presentation?: ProfilePresentationV2
+    ) {
       const settingsStore = useSettingsStore();
       if (process.env.NODE_ENV === 'test' && !settingsStore.loaded) {
         this.classes_unsaved_changes = false;
@@ -242,6 +251,19 @@ export const useCategoryStore = defineStore('categories', {
       if (sourceSnapshot) {
         profiles = _.cloneDeep(profiles);
         profiles[0].sources = _.cloneDeep(sourceSnapshot);
+      }
+      if (presentation) {
+        if (profiles === rules.activity_profiles_v2) profiles = _.cloneDeep(profiles);
+        if (presentation.app_title_source_id) {
+          profiles[0].app_title_source_id = presentation.app_title_source_id;
+        } else {
+          delete profiles[0].app_title_source_id;
+        }
+        if (presentation.browser_focus_source_id) {
+          profiles[0].browser_focus_source_id = presentation.browser_focus_source_id;
+        } else {
+          delete profiles[0].browser_focus_source_id;
+        }
       }
       const profileId = profiles[0]?.id ?? 'default';
       for (const edit of this.pending_v2_edits) {

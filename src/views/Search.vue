@@ -47,7 +47,6 @@ import moment from 'moment';
 import { resolveActivityEventsQuery } from '~/util/activityQuery';
 import { BUILTIN_WINDOW_SOURCE_ID } from '~/util/rulesV2';
 import { useBucketsStore } from '~/stores/buckets';
-import { useSettingsStore } from '~/stores/settings';
 
 import 'vue-awesome/icons/search';
 import 'vue-awesome/icons/spinner';
@@ -74,13 +73,13 @@ export default {
   },
   methods: {
     search: async function () {
-      const advanced = useSettingsStore().compiledRulesV2;
       const bucketsStore = useBucketsStore();
       await bucketsStore.ensureLoaded();
       // v2: search app/title via the configured default window source (builtin_window).
       // If that source is not configured the searched category matches nothing.
       const { query: query_array } = resolveActivityEventsQuery({
         host: this.queryOptions.hostname,
+        filter_afk: this.queryOptions.filter_afk,
         v2: {
           filter_afk: this.queryOptions.filter_afk,
           filter_categories: [['searched']],
@@ -107,15 +106,6 @@ export default {
               },
             },
           ],
-        },
-        legacyParams: {
-          hostname: this.queryOptions.hostname,
-          bid_window: bucketsStore.bucketsWindow(this.queryOptions.hostname)[0],
-          bid_afk: bucketsStore.bucketsAFK(this.queryOptions.hostname)[0],
-          filter_afk: this.queryOptions.filter_afk,
-          categories: [[['searched'], { type: 'regex', regex: this.pattern }]],
-          filter_categories: [['searched']],
-          ...(advanced ? { ...advanced, category_specs: undefined } : {}),
         },
       });
       const timeperiods = [
