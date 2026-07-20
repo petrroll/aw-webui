@@ -2,6 +2,7 @@ import type { Category } from '~/util/classes';
 import { validateRegex } from '~/util/validate';
 
 export const RULES_SCHEMA_VERSION = 2 as const;
+export const SOURCE_DEFAULTS_VERSION = 1 as const;
 export const MAX_EXPRESSION_DEPTH = 32;
 export const MAX_EXPRESSION_NODES = 4096;
 export const MAX_REGEX_LENGTH = 4096;
@@ -92,6 +93,7 @@ export interface ActiveTimeExpressionV2 {
 
 export interface ActivityProfileV2 {
   schema_version: typeof RULES_SCHEMA_VERSION;
+  source_defaults_version?: typeof SOURCE_DEFAULTS_VERSION;
   id: string;
   category_set_ids: string[];
   sources: SourceDefinitionV2[];
@@ -219,6 +221,23 @@ export function defaultBuiltinWindowSource(createsActivity = true): SourceDefini
     fields: ['app', 'title'],
     ...(createsActivity ? { creates_activity: true } : {}),
   };
+}
+
+export function initializeProfileSourceDefaults(
+  profiles: ActivityProfileV2[]
+): ActivityProfileV2[] {
+  return profiles.map(profile => {
+    if ((profile.source_defaults_version ?? 0) >= SOURCE_DEFAULTS_VERSION) return profile;
+    // A configured built-in source is already an explicit choice, including when
+    // Advanced mode made it context-only. Initialization fills only total absence.
+    return {
+      ...profile,
+      source_defaults_version: SOURCE_DEFAULTS_VERSION,
+      sources: profile.sources.some(source => source.builtin === 'window')
+        ? profile.sources
+        : [defaultBuiltinWindowSource(), ...profile.sources],
+    };
+  });
 }
 
 function isDefaultBuiltinWindowSource(source: SourceDefinitionV2): boolean {
@@ -397,6 +416,7 @@ export function migrateLegacySettings(input: {
     activity_profiles_v2: [
       {
         schema_version: RULES_SCHEMA_VERSION,
+        source_defaults_version: SOURCE_DEFAULTS_VERSION,
         id: 'default',
         category_set_ids: ['default'],
         sources: [defaultBuiltinWindowSource()],
@@ -600,6 +620,7 @@ export function applyRulesSimplification(input: {
   };
   const profile: ActivityProfileV2 = {
     ...input.profile,
+    source_defaults_version: SOURCE_DEFAULTS_VERSION,
     category_set_ids: [categorySet.id],
     sources: [defaultBuiltinWindowSource()],
     active_time: {

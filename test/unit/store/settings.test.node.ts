@@ -67,6 +67,100 @@ describe('settings store', () => {
     Reflect.deleteProperty(global, 'localStorage');
   });
 
+  test('initializes the default window source once for interim v2 profiles', async () => {
+    const post = jest.fn();
+    Object.defineProperty(global, 'localStorage', {
+      configurable: true,
+      value: {
+        getItem: jest.fn().mockReturnValue(null),
+        setItem: jest.fn(),
+        length: 0,
+        key: jest.fn().mockReturnValue(null),
+      },
+    });
+    (getClient as jest.Mock).mockReturnValue({
+      get_settings: jest.fn().mockResolvedValue({
+        activity_profiles_v2: [
+          {
+            schema_version: 2,
+            id: 'default',
+            category_set_ids: ['default'],
+            sources: [
+              {
+                id: 'desktop',
+                label: 'Virtual desktop',
+                bucket_ids: ['desktop'],
+                scope: 'global',
+                fields: ['vdesktop'],
+              },
+            ],
+            active_time: {
+              type: 'legacy',
+              use_afk: true,
+              include_audible: true,
+              always_active_pattern: '',
+            },
+          },
+        ],
+        category_sets_v2: [{ schema_version: 2, id: 'default', categories: [] }],
+      }),
+      req: { post, defaults: { timeout: 0 } },
+    });
+
+    await settingsStore.load();
+
+    expect(settingsStore.activity_profiles_v2?.[0].source_defaults_version).toBe(1);
+    expect(settingsStore.activity_profiles_v2?.[0].sources).toEqual([
+      expect.objectContaining({
+        id: 'builtin_window',
+        builtin: 'window',
+        creates_activity: true,
+        fields: ['app', 'title'],
+      }),
+      expect.objectContaining({ id: 'desktop' }),
+    ]);
+    expect(post).not.toHaveBeenCalled();
+    Reflect.deleteProperty(global, 'localStorage');
+  });
+
+  test('does not restore a window source removed after defaults were initialized', async () => {
+    Object.defineProperty(global, 'localStorage', {
+      configurable: true,
+      value: {
+        getItem: jest.fn().mockReturnValue(null),
+        setItem: jest.fn(),
+        length: 0,
+        key: jest.fn().mockReturnValue(null),
+      },
+    });
+    (getClient as jest.Mock).mockReturnValue({
+      get_settings: jest.fn().mockResolvedValue({
+        activity_profiles_v2: [
+          {
+            schema_version: 2,
+            source_defaults_version: 1,
+            id: 'default',
+            category_set_ids: ['default'],
+            sources: [],
+            active_time: {
+              type: 'legacy',
+              use_afk: true,
+              include_audible: true,
+              always_active_pattern: '',
+            },
+          },
+        ],
+        category_sets_v2: [{ schema_version: 2, id: 'default', categories: [] }],
+      }),
+      req: { post: jest.fn(), defaults: { timeout: 0 } },
+    });
+
+    await settingsStore.load();
+
+    expect(settingsStore.activity_profiles_v2?.[0].sources).toEqual([]);
+    Reflect.deleteProperty(global, 'localStorage');
+  });
+
   test('migrates predecessor category sets without dropping inactive sets', async () => {
     Object.defineProperty(global, 'localStorage', {
       configurable: true,

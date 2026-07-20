@@ -6,6 +6,7 @@ import {
   defaultBuiltinWindowSource,
   deleteCategoryRuleV2,
   inferRulesEditorMode,
+  initializeProfileSourceDefaults,
   isLegacyCompatibleRuleV2,
   legacyRuleToV2,
   migrateLegacySettings,
@@ -58,6 +59,7 @@ describe('rules v2 migration', () => {
     expect(migrated.activity_profiles_v2[0].sources).toEqual([
       defaultBuiltinWindowSource(),
     ]);
+    expect(migrated.activity_profiles_v2[0].source_defaults_version).toBe(1);
   });
 
   test('always migrates legacy classes into the stable default set', () => {
@@ -69,6 +71,45 @@ describe('rules v2 migration', () => {
     expect(migrated.category_sets_v2).toHaveLength(1);
     expect(migrated.category_sets_v2[0].id).toBe('default');
     expect(migrated.category_sets_v2[0].categories[0].id).toBe('default:Work');
+  });
+
+  test('initializes only profiles that have no explicit window source choice', () => {
+    const profile = {
+      schema_version: 2 as const,
+      id: 'default',
+      category_set_ids: ['default'],
+      sources: [],
+      active_time: {
+        type: 'legacy' as const,
+        use_afk: true,
+        include_audible: true,
+        always_active_pattern: '',
+      },
+    };
+
+    expect(initializeProfileSourceDefaults([profile])[0]).toMatchObject({
+      source_defaults_version: 1,
+      sources: [defaultBuiltinWindowSource()],
+    });
+    expect(
+      initializeProfileSourceDefaults([
+        {
+          ...profile,
+          sources: [defaultBuiltinWindowSource(false)],
+        },
+      ])[0]
+    ).toMatchObject({
+      source_defaults_version: 1,
+      sources: [defaultBuiltinWindowSource(false)],
+    });
+    expect(
+      initializeProfileSourceDefaults([
+        {
+          ...profile,
+          source_defaults_version: 1,
+        },
+      ])[0].sources
+    ).toEqual([]);
   });
 
   test('preserves persisted sets when creating a default profile', () => {

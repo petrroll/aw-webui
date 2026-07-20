@@ -15,6 +15,7 @@ import {
   categorySetToLegacyClasses,
   migrateCategorySet,
   migrateLegacySettings,
+  initializeProfileSourceDefaults,
   resolveRulesV2Settings,
   inferRulesEditorMode,
   getLegacyWindowMode,
@@ -390,6 +391,11 @@ export const useSettingsStore = defineStore('settings', {
             ];
           }
         }
+      }
+      if (Array.isArray(storage.activity_profiles_v2)) {
+        storage.activity_profiles_v2 = initializeProfileSourceDefaults(
+          storage.activity_profiles_v2 as ActivityProfileV2[]
+        );
       }
       this.$patch({ ...storage, _loaded: true });
 
