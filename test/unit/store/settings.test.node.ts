@@ -109,7 +109,7 @@ describe('settings store', () => {
 
     await settingsStore.load();
 
-    expect(settingsStore.activity_profiles_v2?.[0].source_defaults_version).toBe(1);
+    expect(settingsStore.activity_profiles_v2?.[0].source_defaults_version).toBe(2);
     expect(settingsStore.activity_profiles_v2?.[0].sources).toEqual([
       expect.objectContaining({
         id: 'builtin_window',
@@ -118,6 +118,12 @@ describe('settings store', () => {
         fields: ['app', 'title'],
       }),
       expect.objectContaining({ id: 'desktop' }),
+      expect.objectContaining({ id: 'browser', builtin: 'browser' }),
+      expect.objectContaining({
+        id: 'stopwatch',
+        builtin: 'stopwatch',
+        creates_activity: true,
+      }),
     ]);
     expect(post).not.toHaveBeenCalled();
     Reflect.deleteProperty(global, 'localStorage');
@@ -138,7 +144,7 @@ describe('settings store', () => {
         activity_profiles_v2: [
           {
             schema_version: 2,
-            source_defaults_version: 1,
+            source_defaults_version: 2,
             id: 'default',
             category_set_ids: ['default'],
             sources: [],

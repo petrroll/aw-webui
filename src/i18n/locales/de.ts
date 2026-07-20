@@ -286,6 +286,8 @@ export default {
         'Die Standardquelle für App & Fenster. ActivityWatch löst ihre Gerätefenster-Buckets automatisch auf. Im Erweitert-Modus können Sie sie wie jede andere Quelle umbenennen, neu zuordnen oder entfernen; AFK wird unter Aktivzeit konfiguriert.',
       builtinWindowBucketsHelp:
         'Leer lassen, um das Fenster-Bucket jedes Geräts automatisch zu ermitteln, oder exakte Bucket-IDs angeben, um es zu überschreiben.',
+      builtinDetectedBucketsHelp:
+        'Buckets werden auf jedem Gerät automatisch erkannt. Exakte Bucket-IDs nur angeben, um die Erkennung zu überschreiben.',
       builtinWindowDiscoveredBucket: 'Automatisch ermittelt: {bucket} — Gerät: {host}',
       builtinWindowFieldsHelp:
         'Wählen Sie die Felder für App-&-Fenster-Regeln. Standardmäßig sind dies app und title.',

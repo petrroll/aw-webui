@@ -73,6 +73,7 @@ type Category = [string[], Rule];
 
 export interface ContextSource {
   source_id: string;
+  builtin?: 'window' | 'browser' | 'stopwatch';
   bucket_ids: string[];
   scope?: 'host' | 'global';
   bucket_hosts?: Record<string, string>;
@@ -83,6 +84,7 @@ export interface ContextSource {
 
 export interface ActiveTimeSource {
   source_id: string;
+  builtin?: 'window' | 'browser' | 'stopwatch' | 'afk';
   bucket_ids: string[];
   scope?: 'host' | 'global';
   bucket_hosts?: Record<string, string>;
@@ -100,6 +102,7 @@ export interface ActivitySource {
 
 export interface ActivityCoverageSource {
   source_id: string;
+  builtin?: 'window' | 'browser' | 'stopwatch';
   bucket_ids: string[];
   scope?: 'host' | 'global';
   bucket_hosts?: Record<string, string>;
@@ -304,6 +307,21 @@ function validateUniqueSourceIds(sources: Array<{ source_id: string }>, sourceKi
   }
 }
 
+function materializeBuiltinBucketIds(
+  source: {
+    builtin?: 'window' | 'browser' | 'stopwatch' | 'afk';
+    bucket_ids: string[];
+  },
+  params: BaseQueryParams
+): string[] {
+  if (source.bucket_ids.length > 0) return source.bucket_ids;
+  if (source.builtin === 'browser') return params.bid_browsers ?? [];
+  if (source.builtin === 'stopwatch') {
+    return params.bid_stopwatch ? [params.bid_stopwatch] : [];
+  }
+  return source.bucket_ids;
+}
+
 function contextEvents(params: BaseQueryParams): string {
   const sources = params.context_sources ?? [];
   if (sources.length === 0) {
@@ -314,13 +332,24 @@ function contextEvents(params: BaseQueryParams): string {
   validateUniqueSourceIds(sources, 'Context');
 
   return sources
-    .map((source, index) => {
+    .map((configuredSource, index) => {
+      const source = {
+        ...configuredSource,
+        bucket_ids: materializeBuiltinBucketIds(configuredSource, params),
+        scope:
+          (configuredSource.builtin === 'browser' || configuredSource.builtin === 'stopwatch') &&
+          !configuredSource.scope &&
+          configuredSource.bucket_ids.length === 0
+            ? ('global' as const)
+            : configuredSource.scope,
+      };
       if (!/^[A-Za-z0-9_-]+$/.test(source.source_id)) {
         throw new Error("Context source_id may only contain letters, numbers, '_' and '-'");
       }
-      if (source.bucket_ids.length === 0) {
+      if (source.bucket_ids.length === 0 && !source.builtin) {
         throw new Error('Context source must contain at least one bucket_id');
       }
+      if (source.bucket_ids.length === 0) return '';
       if (source.fields.length === 0) {
         throw new Error('Context source must contain at least one field');
       }
@@ -389,7 +418,18 @@ ${variable} = union_no_overlap(${variable}, activity_bucket_${index}_${bucketInd
 }
 
 function activityCoverageEvents(params: DesktopQueryParams): string {
-  const sources = params.activity_coverage_sources ?? [];
+  const sources = (params.activity_coverage_sources ?? [])
+    .map(source => ({
+      ...source,
+      bucket_ids: materializeBuiltinBucketIds(source, params),
+      scope:
+        (source.builtin === 'browser' || source.builtin === 'stopwatch') &&
+        !source.scope &&
+        source.bucket_ids.length === 0
+          ? ('global' as const)
+          : source.scope,
+    }))
+    .filter(source => source.bucket_ids.length > 0 || !source.builtin);
   if (sources.length === 0) return '';
   requireCapability(params, RULE_ENGINE_CAPABILITIES.sourceNamespace, 'Activity coverage sources');
   validateUniqueSourceIds(sources, 'Activity coverage');
@@ -401,9 +441,10 @@ function activityCoverageEvents(params: DesktopQueryParams): string {
           "Activity coverage source_id may only contain letters, numbers, '_' and '-'"
         );
       }
-      if (source.bucket_ids.length === 0) {
+      if (source.bucket_ids.length === 0 && !source.builtin) {
         throw new Error('Activity coverage source must contain at least one bucket_id');
       }
+      if (source.bucket_ids.length === 0) return '';
       if (source.fields.length === 0) {
         throw new Error('Activity coverage source must contain at least one field');
       }
@@ -488,7 +529,17 @@ export function activeTimeEvents(params: DesktopQueryParams): string {
   if (sources.length === 0) {
     throw new Error('Active-time expressions require at least one source');
   }
-  const sourceVariables = sources.map((source, index) => {
+  const sourceVariables = sources.map((configuredSource, index) => {
+    const source = {
+      ...configuredSource,
+      bucket_ids: materializeBuiltinBucketIds(configuredSource, params),
+      scope:
+        (configuredSource.builtin === 'browser' || configuredSource.builtin === 'stopwatch') &&
+        !configuredSource.scope &&
+        configuredSource.bucket_ids.length === 0
+          ? ('global' as const)
+          : configuredSource.scope,
+    };
     if (!/^[A-Za-z0-9_-]+$/.test(source.source_id)) {
       throw new Error("Active-time source_id may only contain letters, numbers, '_' and '-'");
     }

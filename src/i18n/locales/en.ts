@@ -281,6 +281,8 @@ export default {
         'Choose which fields are available to App & window rules. The defaults are app and title.',
       builtinWindowBucketsHelp:
         'Leave empty to auto-discover each device window bucket, or pin exact bucket IDs to override.',
+      builtinDetectedBucketsHelp:
+        'Buckets are detected automatically on each device. Enter exact bucket IDs only to pin an override.',
       builtinWindowDiscoveredBucket: 'Auto-discovered: {bucket} — device: {host}',
       noActivityCreatingSourceWarning:
         'No source can currently create activity periods. Categories will have no time to classify until at least one source is enabled.',

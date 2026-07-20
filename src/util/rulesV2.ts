@@ -2,13 +2,16 @@ import type { Category } from '~/util/classes';
 import { validateRegex } from '~/util/validate';
 
 export const RULES_SCHEMA_VERSION = 2 as const;
-export const SOURCE_DEFAULTS_VERSION = 1 as const;
+export const SOURCE_DEFAULTS_VERSION = 2;
 export const MAX_EXPRESSION_DEPTH = 32;
 export const MAX_EXPRESSION_NODES = 4096;
 export const MAX_REGEX_LENGTH = 4096;
 export const MAX_CATEGORY_RULES = 1000;
 export const MAX_RULE_SOURCES = 128;
 export const BUILTIN_WINDOW_SOURCE_ID = 'builtin_window';
+export const BUILTIN_BROWSER_SOURCE_ID = 'browser';
+export const BUILTIN_STOPWATCH_SOURCE_ID = 'stopwatch';
+export type BuiltinSource = 'window' | 'browser' | 'stopwatch';
 
 export type RuleValueMode = 'string' | 'scalar';
 
@@ -57,7 +60,7 @@ export interface SourceDefinitionV2 {
   id: string;
   label: string;
   bucket_ids: string[];
-  builtin?: 'window';
+  builtin?: BuiltinSource;
   scope?: 'host' | 'global';
   bucket_hosts?: Record<string, string>;
   fields: string[];
@@ -93,7 +96,7 @@ export interface ActiveTimeExpressionV2 {
 
 export interface ActivityProfileV2 {
   schema_version: typeof RULES_SCHEMA_VERSION;
-  source_defaults_version?: typeof SOURCE_DEFAULTS_VERSION;
+  source_defaults_version?: number;
   id: string;
   category_set_ids: string[];
   sources: SourceDefinitionV2[];
@@ -164,7 +167,7 @@ export interface CompiledProfileQueryOptions {
 
 export interface CompiledCoverageSourceV2 {
   source_id: string;
-  builtin?: 'window';
+  builtin?: BuiltinSource;
   bucket_ids: string[];
   scope?: 'host' | 'global';
   bucket_hosts?: Record<string, string>;
@@ -178,7 +181,7 @@ export interface CompiledContextSourceV2 extends CompiledCoverageSourceV2 {
 
 export interface CompiledActiveSourceV2 {
   source_id: string;
-  builtin?: 'window' | 'afk';
+  builtin?: BuiltinSource | 'afk';
   bucket_ids: string[];
   scope?: 'host' | 'global';
   bucket_hosts?: Record<string, string>;
@@ -223,31 +226,89 @@ export function defaultBuiltinWindowSource(createsActivity = true): SourceDefini
   };
 }
 
+export function defaultBuiltinBrowserSource(): SourceDefinitionV2 {
+  return {
+    id: BUILTIN_BROWSER_SOURCE_ID,
+    label: 'Browser tabs',
+    bucket_ids: [],
+    builtin: 'browser',
+    fields: ['title', 'url', 'audible', 'incognito', 'tabCount'],
+  };
+}
+
+export function defaultBuiltinStopwatchSource(): SourceDefinitionV2 {
+  return {
+    id: BUILTIN_STOPWATCH_SOURCE_ID,
+    label: 'Stopwatch',
+    bucket_ids: [],
+    builtin: 'stopwatch',
+    fields: ['label'],
+    creates_activity: true,
+  };
+}
+
+export function defaultBuiltinSources(): SourceDefinitionV2[] {
+  return [
+    defaultBuiltinWindowSource(),
+    defaultBuiltinBrowserSource(),
+    defaultBuiltinStopwatchSource(),
+  ];
+}
+
 export function initializeProfileSourceDefaults(
   profiles: ActivityProfileV2[]
 ): ActivityProfileV2[] {
   return profiles.map(profile => {
     if ((profile.source_defaults_version ?? 0) >= SOURCE_DEFAULTS_VERSION) return profile;
-    // A configured built-in source is already an explicit choice, including when
-    // Advanced mode made it context-only. Initialization fills only total absence.
+    const sources = [...profile.sources];
+    if (!sources.some(source => source.builtin === 'window')) {
+      sources.unshift(defaultBuiltinWindowSource());
+    }
+    if (!sources.some(source => source.id === BUILTIN_BROWSER_SOURCE_ID)) {
+      sources.push(defaultBuiltinBrowserSource());
+    }
+    if (!sources.some(source => source.id === BUILTIN_STOPWATCH_SOURCE_ID)) {
+      sources.push(defaultBuiltinStopwatchSource());
+    }
     return {
       ...profile,
       source_defaults_version: SOURCE_DEFAULTS_VERSION,
-      sources: profile.sources.some(source => source.builtin === 'window')
-        ? profile.sources
-        : [defaultBuiltinWindowSource(), ...profile.sources],
+      sources,
     };
   });
 }
 
 function isDefaultBuiltinWindowSource(source: SourceDefinitionV2): boolean {
-  const defaults = defaultBuiltinWindowSource();
-  return (
-    source.builtin === 'window' &&
-    source.label === defaults.label &&
-    source.creates_activity === true &&
-    source.fields.length === defaults.fields.length &&
-    source.fields.every((field, index) => field === defaults.fields[index])
+  return isExactSourceDefinition(source, defaultBuiltinWindowSource());
+}
+
+function isExactSourceDefinition(
+  source: SourceDefinitionV2,
+  expected: SourceDefinitionV2
+): boolean {
+  const sourceKeys = Object.keys(source).sort();
+  const expectedKeys = Object.keys(expected).sort();
+  if (
+    sourceKeys.length !== expectedKeys.length ||
+    sourceKeys.some((key, index) => key !== expectedKeys[index])
+  ) {
+    return false;
+  }
+  return expectedKeys.every(key => {
+    const actualValue = Reflect.get(source, key);
+    const expectedValue = Reflect.get(expected, key);
+    return Array.isArray(expectedValue)
+      ? Array.isArray(actualValue) &&
+          actualValue.length === expectedValue.length &&
+          actualValue.every((value, index) => value === expectedValue[index])
+      : actualValue === expectedValue;
+  });
+}
+
+function isDefaultBuiltinSource(source: SourceDefinitionV2): boolean {
+  if (isDefaultBuiltinWindowSource(source)) return true;
+  return [defaultBuiltinBrowserSource(), defaultBuiltinStopwatchSource()].some(expected =>
+    isExactSourceDefinition(source, expected)
   );
 }
 
@@ -419,7 +480,7 @@ export function migrateLegacySettings(input: {
         source_defaults_version: SOURCE_DEFAULTS_VERSION,
         id: 'default',
         category_set_ids: ['default'],
-        sources: [defaultBuiltinWindowSource()],
+        sources: defaultBuiltinSources(),
         active_time: {
           type: 'legacy',
           use_afk: true,
@@ -515,8 +576,11 @@ export function inferRulesEditorMode(
   profile: ActivityProfileV2,
   categorySet: CategorySetV2
 ): RulesEditorMode {
+  const hasEveryDefaultSource =
+    profile.sources.length === defaultBuiltinSources().length &&
+    profile.sources.every(isDefaultBuiltinSource);
   if (
-    profile.sources.some(source => !isDefaultBuiltinWindowSource(source)) ||
+    !hasEveryDefaultSource ||
     profile.active_time.type === 'expression' ||
     categorySet.categories.some(category => category.simple_ui !== true)
   ) {
@@ -548,7 +612,7 @@ export function getLegacyWindowMode(
       category => category.rule.type !== 'none' && expressionUsesLegacyWindow(category.rule)
     )
   ) {
-    return windowSource ? 'context' : 'activity';
+    return windowSource ? 'context' : 'none';
   }
   if (profile.active_time.type === 'legacy' && profile.active_time.always_active_pattern) {
     return 'context';
@@ -579,7 +643,7 @@ export function computeRulesSimplificationLosses(
         ? JSON.parse(JSON.stringify(profile.active_time.rule))
         : null,
     sources: profile.sources
-      .filter(source => !isDefaultBuiltinWindowSource(source))
+      .filter(source => !isDefaultBuiltinSource(source))
       .map(source => ({
         id: source.id,
         label: source.label,
@@ -622,7 +686,7 @@ export function applyRulesSimplification(input: {
     ...input.profile,
     source_defaults_version: SOURCE_DEFAULTS_VERSION,
     category_set_ids: [categorySet.id],
-    sources: [defaultBuiltinWindowSource()],
+    sources: defaultBuiltinSources(),
     active_time: {
       type: 'legacy',
       use_afk: true,
@@ -782,7 +846,12 @@ export function validateActivityProfile(
     if (sourceIds.has(source.id)) errors.push(`sources[${index}].id is duplicated`);
     sourceIds.add(source.id);
     if (source.builtin) {
-      if (source.builtin !== 'window' || source.id !== BUILTIN_WINDOW_SOURCE_ID) {
+      const expectedId = {
+        window: BUILTIN_WINDOW_SOURCE_ID,
+        browser: BUILTIN_BROWSER_SOURCE_ID,
+        stopwatch: BUILTIN_STOPWATCH_SOURCE_ID,
+      }[source.builtin];
+      if (source.id !== expectedId) {
         errors.push(`sources[${index}].builtin is unsupported`);
       }
     } else if (source.bucket_ids.length === 0) {
@@ -931,7 +1000,7 @@ export function compileProfileQueryOptions(
     categorySet.categories.flatMap(category => [...collectRuleSourceIds(category.rule)])
   );
   const contextSources = profile.sources
-    .filter(source => !source.builtin)
+    .filter(source => source.builtin !== 'window')
     .filter(source => categorySourceIds.has(source.id) && !source.creates_activity)
     .map(source => ({
       source_id: source.id,
@@ -941,6 +1010,7 @@ export function compileProfileQueryOptions(
       fields: [...source.fields],
       conflict: 'base_wins' as const,
       host: source.host,
+      ...(source.builtin ? { builtin: source.builtin } : {}),
     }));
   if (
     (contextSources.length > 0 || legacyWindowMode === 'context') &&
@@ -957,8 +1027,13 @@ export function compileProfileQueryOptions(
     category_specs: categorySpecs,
     context_sources: contextSources,
     activity_coverage_sources: profile.sources
-      .filter(source => !source.builtin)
+      .filter(source => source.builtin !== 'window')
       .filter(source => source.creates_activity)
+      .filter(
+        source =>
+          source.builtin !== 'stopwatch' ||
+          capabilities.includes('query.merge_subwatcher_fields.source_namespace.v1')
+      )
       .map(source => ({
         source_id: source.id,
         bucket_ids: [...source.bucket_ids],
@@ -966,6 +1041,7 @@ export function compileProfileQueryOptions(
         ...(source.bucket_hosts ? { bucket_hosts: { ...source.bucket_hosts } } : {}),
         fields: [...source.fields],
         host: source.host,
+        ...(source.builtin ? { builtin: source.builtin } : {}),
       })),
     activity_sources: [],
     background_sources: [],
@@ -991,7 +1067,7 @@ export function compileProfileQueryOptions(
     result.active_time_rule = profile.active_time.rule;
     const activeSourceIds = collectRuleSourceIds(profile.active_time.rule);
     result.active_time_sources = profile.sources
-      .filter(source => !source.builtin)
+      .filter(source => source.builtin !== 'window')
       .filter(source => activeSourceIds.has(source.id))
       .map(source => ({
         source_id: source.id,
@@ -999,6 +1075,7 @@ export function compileProfileQueryOptions(
         scope: source.scope,
         ...(source.bucket_hosts ? { bucket_hosts: { ...source.bucket_hosts } } : {}),
         host: source.host,
+        ...(source.builtin ? { builtin: source.builtin } : {}),
       }));
   }
   return result;
@@ -1047,6 +1124,16 @@ export function compileActivityQueryV2(
   if (!categorySet) {
     throw new Error(`Category set ${profile.category_set_ids[0]} is unavailable`);
   }
+  if (
+    !profile.sources.some(source => source.builtin === 'window') &&
+    categorySet.categories.some(
+      category => category.rule.type !== 'none' && expressionUsesLegacyWindow(category.rule)
+    )
+  ) {
+    throw new Error(
+      'Invalid v2 rules settings: unsourced category rules require the App & window source'
+    );
+  }
 
   const category_specs = categorySet.categories.map(category => ({
     id: category.id,
@@ -1088,24 +1175,25 @@ export function compileActivityQueryV2(
       }
       continue;
     }
+    const location = {
+      bucket_ids: [...source.bucket_ids],
+      scope: source.bucket_ids.length === 0 && source.builtin ? ('host' as const) : source.scope,
+      ...(source.bucket_hosts ? { bucket_hosts: { ...source.bucket_hosts } } : {}),
+      host: source.host,
+      ...(source.builtin ? { builtin: source.builtin } : {}),
+    };
     if (source.creates_activity) {
       activity_coverage_sources.push({
         source_id: source.id,
-        bucket_ids: [...source.bucket_ids],
-        scope: source.scope,
-        ...(source.bucket_hosts ? { bucket_hosts: { ...source.bucket_hosts } } : {}),
+        ...location,
         fields: [...source.fields],
-        host: source.host,
       });
     } else if (categorySourceIds.has(source.id)) {
       context_sources.push({
         source_id: source.id,
-        bucket_ids: [...source.bucket_ids],
-        scope: source.scope,
-        ...(source.bucket_hosts ? { bucket_hosts: { ...source.bucket_hosts } } : {}),
+        ...location,
         fields: [...source.fields],
         conflict: 'base_wins',
-        host: source.host,
       });
     }
   }
@@ -1158,9 +1246,10 @@ export function compileActivityQueryV2(
         result.active_time_sources.push({
           source_id: source.id,
           bucket_ids: [...source.bucket_ids],
-          scope: source.scope,
+          scope: source.bucket_ids.length === 0 && source.builtin ? 'host' : source.scope,
           ...(source.bucket_hosts ? { bucket_hosts: { ...source.bucket_hosts } } : {}),
           host: source.host,
+          ...(source.builtin ? { builtin: source.builtin } : {}),
         });
       }
     }

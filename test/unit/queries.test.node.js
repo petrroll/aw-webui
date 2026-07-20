@@ -47,3 +47,48 @@ test('generate fullDesktopQuery', () => {
   expect(query).toMatchSnapshot();
   expectBracketsClosed(query);
 });
+
+test('materializes configured browser and stopwatch builtins from legacy bucket parameters', () => {
+  const browser = 'aw-watcher-web-chrome_testhost';
+  const stopwatch = 'aw-stopwatch';
+  const query = queries
+    .fullDesktopQuery({
+      ...queryParams,
+      bid_browsers: [browser],
+      bid_stopwatch: stopwatch,
+      capabilities: [
+        'query.categorize_v2.v1',
+        'query.merge_subwatcher_fields.source_namespace.v1',
+      ],
+      category_specs: [
+        {
+          id: 'browser',
+          name: ['Browser'],
+          rule: { type: 'regex', source: 'browser', field: 'url', regex: 'github' },
+        },
+      ],
+      context_sources: [
+        {
+          source_id: 'browser',
+          builtin: 'browser',
+          bucket_ids: [],
+          fields: ['url'],
+        },
+      ],
+      activity_coverage_sources: [
+        {
+          source_id: 'stopwatch',
+          builtin: 'stopwatch',
+          bucket_ids: [],
+          fields: ['label'],
+        },
+      ],
+    })
+    .join('\n');
+
+  expect(query).toContain(browser);
+  expect(query).toContain(stopwatch);
+  expect(query).toContain('"source_id":"browser"');
+  expect(query).toContain('"source_id":"stopwatch"');
+  expectBracketsClosed(query);
+});

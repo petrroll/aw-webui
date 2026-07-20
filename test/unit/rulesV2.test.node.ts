@@ -3,6 +3,9 @@ import {
   categorySetToLegacyClasses,
   compileProfileQueryOptions,
   computeRulesSimplificationLosses,
+  defaultBuiltinBrowserSource,
+  defaultBuiltinSources,
+  defaultBuiltinStopwatchSource,
   defaultBuiltinWindowSource,
   deleteCategoryRuleV2,
   inferRulesEditorMode,
@@ -56,10 +59,8 @@ describe('rules v2 migration', () => {
       include_audible: true,
       always_active_pattern: 'Teams',
     });
-    expect(migrated.activity_profiles_v2[0].sources).toEqual([
-      defaultBuiltinWindowSource(),
-    ]);
-    expect(migrated.activity_profiles_v2[0].source_defaults_version).toBe(1);
+    expect(migrated.activity_profiles_v2[0].sources).toEqual(defaultBuiltinSources());
+    expect(migrated.activity_profiles_v2[0].source_defaults_version).toBe(2);
   });
 
   test('always migrates legacy classes into the stable default set', () => {
@@ -73,7 +74,7 @@ describe('rules v2 migration', () => {
     expect(migrated.category_sets_v2[0].categories[0].id).toBe('default:Work');
   });
 
-  test('initializes only profiles that have no explicit window source choice', () => {
+  test('initializes built-in sources once while preserving explicit choices', () => {
     const profile = {
       schema_version: 2 as const,
       id: 'default',
@@ -88,8 +89,8 @@ describe('rules v2 migration', () => {
     };
 
     expect(initializeProfileSourceDefaults([profile])[0]).toMatchObject({
-      source_defaults_version: 1,
-      sources: [defaultBuiltinWindowSource()],
+      source_defaults_version: 2,
+      sources: defaultBuiltinSources(),
     });
     expect(
       initializeProfileSourceDefaults([
@@ -99,14 +100,18 @@ describe('rules v2 migration', () => {
         },
       ])[0]
     ).toMatchObject({
-      source_defaults_version: 1,
-      sources: [defaultBuiltinWindowSource(false)],
+      source_defaults_version: 2,
+      sources: [
+        defaultBuiltinWindowSource(false),
+        defaultBuiltinBrowserSource(),
+        defaultBuiltinStopwatchSource(),
+      ],
     });
     expect(
       initializeProfileSourceDefaults([
         {
           ...profile,
-          source_defaults_version: 1,
+          source_defaults_version: 2,
         },
       ])[0].sources
     ).toEqual([]);
@@ -771,21 +776,44 @@ describe('rules v2 validation', () => {
 
     test('infers advanced mode for non-simple canonical configuration', () => {
       expect(inferRulesEditorMode(profile, categorySet)).toBe('advanced');
+      const simpleProfile = {
+        ...profile,
+        sources: defaultBuiltinSources(),
+        active_time: {
+          type: 'legacy' as const,
+          use_afk: true,
+          include_audible: true,
+          always_active_pattern: '',
+        },
+      };
+      expect(
+        inferRulesEditorMode(simpleProfile, {
+          ...categorySet,
+          categories: [categorySet.categories[0]],
+        })
+      ).toBe('simple');
+      expect(
+        inferRulesEditorMode(
+          { ...simpleProfile, sources: [] },
+          { ...categorySet, categories: [categorySet.categories[0]] }
+        )
+      ).toBe('advanced');
       expect(
         inferRulesEditorMode(
           {
-            ...profile,
-            sources: [],
-            active_time: {
-              type: 'legacy',
-              use_afk: true,
-              include_audible: true,
-              always_active_pattern: '',
-            },
+            ...simpleProfile,
+            sources: [
+              {
+                ...defaultBuiltinWindowSource(),
+                bucket_ids: ['window'],
+                scope: 'global',
+              },
+              ...defaultBuiltinSources().slice(1),
+            ],
           },
           { ...categorySet, categories: [categorySet.categories[0]] }
         )
-      ).toBe('simple');
+      ).toBe('advanced');
     });
 
     test('reports exact simplification losses before mutation', () => {
@@ -815,7 +843,7 @@ describe('rules v2 validation', () => {
       });
 
       expect(simplified.activity_profiles_v2[0]).toMatchObject({
-        sources: [defaultBuiltinWindowSource()],
+        sources: defaultBuiltinSources(),
         active_time: {
           type: 'legacy',
           use_afk: true,
@@ -1170,7 +1198,7 @@ describe('v2 profile compiler', () => {
         schema_version: 2,
         id: 'default',
         category_set_ids: ['default'],
-        sources: [],
+        sources: defaultBuiltinSources(),
         active_time: {
           type: 'legacy',
           use_afk: true,

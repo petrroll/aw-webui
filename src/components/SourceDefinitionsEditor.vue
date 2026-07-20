@@ -47,8 +47,8 @@ div
         :state="sourceFieldState(index, 'bucket_ids')"
         @input="updateList(index, 'bucket_ids', $event)"
       )
-      small.text-muted(v-if="source.builtin === 'window'")
-        | {{ $t('settings.categorization.builtinWindowBucketsHelp') }}
+      small.text-muted(v-if="source.builtin")
+        | {{ $t(source.builtin === 'window' ? 'settings.categorization.builtinWindowBucketsHelp' : 'settings.categorization.builtinDetectedBucketsHelp') }}
       small.text-muted(v-else) {{ $t('settings.categorization.sourceBucketIdsHelp') }}
       b-form-invalid-feedback
         | {{ $t('settings.categorization.sourceBucketRequired') }}
@@ -58,8 +58,8 @@ div
       )
         | {{ $t('settings.categorization.sourceBucketOwner', { bucket: bucket.id, host: bucket.hostname || $t('settings.categorization.sourceDeviceUnknown') }) }}
       small.text-muted.d-block(
-        v-if="source.builtin === 'window' && source.bucket_ids.length === 0"
-        v-for="bucket in discoveredWindowBuckets"
+        v-if="source.builtin && source.bucket_ids.length === 0"
+        v-for="bucket in discoveredBuiltinBuckets(source)"
         :key="'discovered-' + bucket.id"
       )
         | {{ $t('settings.categorization.builtinWindowDiscoveredBucket', { bucket: bucket.id, host: bucket.hostname || $t('settings.categorization.sourceDeviceUnknown') }) }}
@@ -98,12 +98,13 @@ div
 </template>
 
 <script lang="ts">
-import { defaultBuiltinWindowSource, type SourceDefinitionV2 } from '~/util/rulesV2';
 import {
-  createDefaultRuleSource,
-  createDetectedRuleSource,
-  resolveBucketOwnership,
-} from '~/util/rulesEditor';
+  defaultBuiltinBrowserSource,
+  defaultBuiltinStopwatchSource,
+  defaultBuiltinWindowSource,
+  type SourceDefinitionV2,
+} from '~/util/rulesV2';
+import { createDefaultRuleSource, resolveBucketOwnership } from '~/util/rulesEditor';
 import { useBucketsStore } from '~/stores/buckets';
 import { useServerStore } from '~/stores/server';
 
@@ -144,13 +145,13 @@ export default {
           label: this.$t('settings.categorization.addBuiltinWindowSource'),
         });
       }
-      if (this.browserBuckets.length > 0 && !sources.some(source => source.id === 'browser')) {
+      if (!sources.some(source => source.id === 'browser')) {
         presets.push({
           id: 'browser',
           label: this.$t('settings.categorization.addBuiltinBrowserSource'),
         });
       }
-      if (this.stopwatchBuckets.length > 0 && !sources.some(source => source.id === 'stopwatch')) {
+      if (!sources.some(source => source.id === 'stopwatch')) {
         presets.push({
           id: 'stopwatch',
           label: this.$t('settings.categorization.addBuiltinStopwatchSource'),
@@ -201,6 +202,12 @@ export default {
     },
     bucketHosts(bucketIds: string[]) {
       return resolveBucketOwnership(bucketIds, this.bucketsStore.buckets).bucketHosts;
+    },
+    discoveredBuiltinBuckets(source: SourceDefinitionV2) {
+      if (source.builtin === 'window') return this.discoveredWindowBuckets;
+      if (source.builtin === 'browser') return this.browserBuckets;
+      if (source.builtin === 'stopwatch') return this.stopwatchBuckets;
+      return [];
     },
     sourceFieldState(index: number, field: 'bucket_ids' | 'fields' | 'scope') {
       const prefix = `sources[${index}]`;
@@ -256,20 +263,9 @@ export default {
       if (id === 'window') {
         source = defaultBuiltinWindowSource();
       } else if (id === 'browser') {
-        source = createDetectedRuleSource({
-          id: 'browser',
-          label: String(this.$t('settings.categorization.bucketLabelBrowser')),
-          buckets: this.browserBuckets,
-          fields: ['title', 'url', 'audible', 'incognito', 'tabCount'],
-        });
+        source = defaultBuiltinBrowserSource();
       } else {
-        source = createDetectedRuleSource({
-          id: 'stopwatch',
-          label: String(this.$t('settings.categorization.bucketLabelStopwatch')),
-          buckets: this.stopwatchBuckets,
-          fields: ['label'],
-          createsActivity: true,
-        });
+        source = defaultBuiltinStopwatchSource();
       }
       this.emitValue([...this.value, source]);
     },

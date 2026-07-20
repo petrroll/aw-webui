@@ -1,20 +1,16 @@
 import {
   compileActivityQueryV2,
   BUILTIN_WINDOW_SOURCE_ID,
+  defaultBuiltinBrowserSource,
+  defaultBuiltinStopwatchSource,
   defaultBuiltinWindowSource,
   resolveRulesV2Settings,
   type ActivityProfileV2,
   type CategorySetV2,
 } from '~/util/rulesV2';
-import {
-  materializeActivityQueryV2,
-  findWindowBucketIds,
-} from '~/util/materializeV2';
+import { materializeActivityQueryV2, findWindowBucketIds } from '~/util/materializeV2';
 import { resolveActivityProfileV2 } from '~/queries';
-import {
-  hostHasResolvedActivityV2,
-  hostHasResolvedActiveTimeV2,
-} from '~/util/activityProfile';
+import { hostHasResolvedActivityV2, hostHasResolvedActiveTimeV2 } from '~/util/activityProfile';
 import type { IBucket } from '~/util/interfaces';
 
 const capabilities = [
@@ -39,6 +35,7 @@ function bucket(id: string, type: string): IBucket {
 const windowBucket = bucket('aw-watcher-window_workstation', 'currentwindow');
 const afkBucket = bucket('aw-watcher-afk_workstation', 'afkstatus');
 const stopwatchBucket = bucket('aw-stopwatch_workstation', 'general.stopwatch');
+const browserBucket = bucket('aw-watcher-web-chrome_workstation', 'web.tab.current');
 const meetingBucket = bucket('aw-watcher-meetings_workstation', 'meetings');
 
 function meetingSet(sourceId: string): CategorySetV2 {
@@ -93,9 +90,7 @@ describe('v2 clean resolver — window is an ordinary source', () => {
     const compiled = compileActivityQueryV2(profile, [meetingSet('meetings')], capabilities);
 
     expect(compiled.activity_coverage_sources.map(s => s.source_id)).toEqual(['meetings']);
-    expect(
-      compiled.activity_coverage_sources.some(s => s.builtin === 'window')
-    ).toBe(false);
+    expect(compiled.activity_coverage_sources.some(s => s.builtin === 'window')).toBe(false);
     expect(compiled).not.toHaveProperty('legacy_window_mode');
 
     const params = materializeActivityQueryV2({
@@ -115,12 +110,12 @@ describe('v2 clean resolver — window is an ordinary source', () => {
     expect(hostHasResolvedActivityV2(host, [meetingBucket], compiled)).toBe(true);
   });
 
-  test('stopwatch-only materializes as an ordinary namespaced coverage source', () => {
+  test('configured stopwatch materializes as an ordinary namespaced coverage source', () => {
     const profile: ActivityProfileV2 = {
       schema_version: 2,
       id: 'default',
       category_set_ids: ['default'],
-      sources: [],
+      sources: [defaultBuiltinStopwatchSource()],
       active_time: {
         type: 'legacy',
         use_afk: true,
@@ -131,7 +126,13 @@ describe('v2 clean resolver — window is an ordinary source', () => {
     const emptySet: CategorySetV2 = { schema_version: 2, id: 'default', categories: [] };
     const compiled = compileActivityQueryV2(profile, [emptySet], capabilities);
 
-    expect(compiled.activity_coverage_sources).toEqual([]);
+    expect(compiled.activity_coverage_sources).toEqual([
+      expect.objectContaining({
+        source_id: 'stopwatch',
+        builtin: 'stopwatch',
+        bucket_ids: [],
+      }),
+    ]);
 
     const params = materializeActivityQueryV2({
       compiled,
@@ -154,12 +155,12 @@ describe('v2 clean resolver — window is an ordinary source', () => {
     expect(query).not.toContain('bid_stopwatch');
   });
 
-  test('an unknown-host stopwatch fallback is a global generated source', () => {
+  test('an unknown-host configured stopwatch fallback is global', () => {
     const profile: ActivityProfileV2 = {
       schema_version: 2,
       id: 'default',
       category_set_ids: ['default'],
-      sources: [],
+      sources: [defaultBuiltinStopwatchSource()],
       active_time: {
         type: 'legacy',
         use_afk: false,
@@ -190,6 +191,126 @@ describe('v2 clean resolver — window is an ordinary source', () => {
       scope: 'global',
     });
     expect(params.activity_coverage_sources[0]).not.toHaveProperty('host');
+  });
+
+  test('includeStopwatch cannot inject an unconfigured coverage source', () => {
+    const profile: ActivityProfileV2 = {
+      schema_version: 2,
+      source_defaults_version: 2,
+      id: 'default',
+      category_set_ids: ['default'],
+      sources: [],
+      active_time: {
+        type: 'legacy',
+        use_afk: false,
+        include_audible: false,
+        always_active_pattern: '',
+      },
+    };
+    const compiled = compileActivityQueryV2(
+      profile,
+      [{ schema_version: 2, id: 'default', categories: [] }],
+      capabilities
+    );
+    const params = materializeActivityQueryV2({
+      compiled,
+      buckets: [stopwatchBucket],
+      host,
+      includeStopwatch: true,
+    });
+
+    expect(params.activity_coverage_sources).toEqual([]);
+  });
+
+  test('configured browser context auto-discovers buckets only when a rule references it', () => {
+    const profile: ActivityProfileV2 = {
+      schema_version: 2,
+      source_defaults_version: 2,
+      id: 'default',
+      category_set_ids: ['default'],
+      sources: [defaultBuiltinWindowSource(), defaultBuiltinBrowserSource()],
+      active_time: {
+        type: 'legacy',
+        use_afk: false,
+        include_audible: false,
+        always_active_pattern: '',
+      },
+    };
+    const browserSet: CategorySetV2 = {
+      schema_version: 2,
+      id: 'default',
+      categories: [
+        {
+          id: 'browser',
+          name: ['Browser'],
+          simple_ui: false,
+          rule: { type: 'regex', source: 'browser', field: 'url', regex: 'github' },
+        },
+      ],
+    };
+    const compiled = compileActivityQueryV2(profile, [browserSet], capabilities);
+    expect(compiled.context_sources).toEqual([
+      expect.objectContaining({
+        source_id: 'browser',
+        builtin: 'browser',
+        bucket_ids: [],
+      }),
+    ]);
+
+    const params = materializeActivityQueryV2({
+      compiled,
+      buckets: [windowBucket, browserBucket],
+      host,
+    });
+    expect(params.context_sources).toEqual([
+      expect.objectContaining({
+        source_id: 'browser',
+        bucket_ids: [browserBucket.id],
+        host,
+      }),
+    ]);
+  });
+
+  test('missing built-in active-time inputs remain named empty sources', () => {
+    const profile: ActivityProfileV2 = {
+      schema_version: 2,
+      source_defaults_version: 2,
+      id: 'default',
+      category_set_ids: ['default'],
+      sources: [defaultBuiltinWindowSource(), defaultBuiltinBrowserSource()],
+      active_time: {
+        type: 'expression',
+        rule: {
+          type: 'any',
+          rules: [
+            { type: 'regex', source: BUILTIN_WINDOW_SOURCE_ID, field: 'app', regex: 'Code' },
+            { type: 'regex', source: 'browser', field: 'audible', regex: 'true' },
+          ],
+        },
+      },
+    };
+    const compiled = compileActivityQueryV2(
+      profile,
+      [{ schema_version: 2, id: 'default', categories: [] }],
+      capabilities
+    );
+    const params = materializeActivityQueryV2({
+      compiled,
+      buckets: [windowBucket],
+      host,
+      filterAfk: true,
+    });
+
+    expect(params.active_time_sources).toEqual([
+      expect.objectContaining({
+        source_id: BUILTIN_WINDOW_SOURCE_ID,
+        bucket_ids: [windowBucket.id],
+      }),
+      expect.objectContaining({
+        source_id: 'browser',
+        bucket_ids: [],
+      }),
+    ]);
   });
 
   test('unconfigured window bucket is inert', () => {
@@ -279,8 +400,13 @@ describe('v2 clean resolver — window is an ordinary source', () => {
       filterAfk: true,
     });
 
-    expect(params.active_time_rule).toBeUndefined();
-    expect(params.active_time_sources).toEqual([]);
+    expect(params.active_time_rule).toEqual(profile.active_time.rule);
+    expect(params.active_time_sources).toEqual([
+      expect.objectContaining({
+        source_id: BUILTIN_WINDOW_SOURCE_ID,
+        bucket_ids: [],
+      }),
+    ]);
     expect(resolveActivityProfileV2(params)).toContain(
       'events = filter_period_intersect(events, not_afk);'
     );
@@ -384,9 +510,7 @@ describe('v2 clean resolver — window is an ordinary source', () => {
       category_sets_v2: [meetingSet('meetings')],
       classes: [],
     });
-    expect(
-      resolved.activity_profiles_v2[0].sources.some(s => s.builtin === 'window')
-    ).toBe(false);
+    expect(resolved.activity_profiles_v2[0].sources.some(s => s.builtin === 'window')).toBe(false);
 
     const compiled = compileActivityQueryV2(
       resolved.activity_profiles_v2[0],
@@ -476,9 +600,7 @@ describe('v2 clean resolver — window is an ordinary source', () => {
     const legacyQuery = resolveActivityProfileV2(legacyParams);
     expect(legacyQuery).toContain('active_periods_v2');
     expect(legacyQuery).toContain('filter_period_intersect(events, not_afk)');
-    expect(hostHasResolvedActiveTimeV2(host, [windowBucket, afkBucket], compiledLegacy)).toBe(
-      true
-    );
+    expect(hostHasResolvedActiveTimeV2(host, [windowBucket, afkBucket], compiledLegacy)).toBe(true);
   });
 });
 
@@ -526,9 +648,9 @@ describe('v2 always-active pattern requires a configured window source', () => {
       filterAfk: true,
     });
     // No window always-active branch is rediscovered from the stray bucket.
-    expect(
-      params.active_time_sources.some(s => s.source_id === BUILTIN_WINDOW_SOURCE_ID)
-    ).toBe(false);
+    expect(params.active_time_sources.some(s => s.source_id === BUILTIN_WINDOW_SOURCE_ID)).toBe(
+      false
+    );
     const query = resolveActivityProfileV2(params);
     expect(query).not.toContain('aw-watcher-window');
   });
@@ -589,9 +711,9 @@ describe('v2 always-active pattern requires a configured window source', () => {
       host,
       filterAfk: true,
     });
-    expect(
-      params.active_time_sources.some(s => s.source_id === BUILTIN_WINDOW_SOURCE_ID)
-    ).toBe(true);
+    expect(params.active_time_sources.some(s => s.source_id === BUILTIN_WINDOW_SOURCE_ID)).toBe(
+      true
+    );
     const query = resolveActivityProfileV2(params);
     expect(query).toContain('aw-watcher-window_workstation');
   });

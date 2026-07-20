@@ -10,7 +10,6 @@ import {
 } from '~/util/rulesV2';
 
 const AFK_SOURCE_ID = 'afk';
-const STOPWATCH_SOURCE_ID = 'stopwatch';
 
 function bucketHost(bucket: IBucket | undefined): string | undefined {
   return bucket?.hostname || bucket?.data?.hostname;
@@ -54,6 +53,14 @@ export function findAfkBucketIds(buckets: IBucket[], host: string): string[] {
     .map(bucket => bucket.id);
 }
 
+export function findBrowserBucketIds(buckets: IBucket[], host: string): string[] {
+  const browserBuckets = buckets.filter(bucket => bucket.type === 'web.tab.current');
+  const owned = browserBuckets.filter(bucket => bucketOwnedByHost(bucket, host));
+  return (
+    owned.length > 0 ? owned : browserBuckets.filter(bucket => bucketHost(bucket) === 'unknown')
+  ).map(bucket => bucket.id);
+}
+
 export function findStopwatchBucketIds(buckets: IBucket[], host: string): string[] {
   const stopwatchBuckets = buckets.filter(bucket => bucket.type === 'general.stopwatch');
   const owned = stopwatchBuckets.filter(bucket => bucketOwnedByHost(bucket, host));
@@ -64,44 +71,65 @@ export function findStopwatchBucketIds(buckets: IBucket[], host: string): string
 
 function materializeCoverageSource(
   source: CompiledCoverageSourceV2,
-  windowBucketIds: string[],
+  buckets: IBucket[],
   host: string
 ): CompiledCoverageSourceV2 {
-  if (source.builtin === 'window' && source.bucket_ids.length === 0) {
-    return {
-      source_id: source.source_id,
-      bucket_ids: [...windowBucketIds],
-      scope: 'host',
-      fields: [...source.fields],
-      host,
+  if (source.builtin && source.bucket_ids.length === 0) {
+    const bucketIds =
+      source.builtin === 'window'
+        ? findWindowBucketIds(buckets, host)
+        : source.builtin === 'browser'
+        ? findBrowserBucketIds(buckets, host)
+        : findStopwatchBucketIds(buckets, host);
+    const usesUnknownFallback = bucketIds.some(
+      bucketId => bucketHost(buckets.find(bucket => bucket.id === bucketId)) === 'unknown'
+    );
+    const materialized: CompiledCoverageSourceV2 = {
+      ...source,
+      bucket_ids: bucketIds,
+      scope: usesUnknownFallback ? 'global' : 'host',
+      ...(usesUnknownFallback ? {} : { host }),
     };
+    if (usesUnknownFallback) delete materialized.host;
+    return materialized;
   }
   return { ...source, bucket_ids: [...source.bucket_ids] };
 }
 
 function materializeContextSource(
   source: CompiledContextSourceV2,
-  windowBucketIds: string[],
+  buckets: IBucket[],
   host: string
 ): CompiledContextSourceV2 {
   return {
-    ...materializeCoverageSource(source, windowBucketIds, host),
+    ...materializeCoverageSource(source, buckets, host),
     conflict: 'base_wins',
   };
 }
 
 function materializeActiveSource(
   source: CompiledActiveSourceV2,
-  windowBucketIds: string[],
+  buckets: IBucket[],
   host: string
 ): CompiledActiveSourceV2 {
-  if (source.builtin === 'window' && source.bucket_ids.length === 0) {
-    return {
-      source_id: source.source_id,
-      bucket_ids: [...windowBucketIds],
-      scope: 'host',
-      host,
+  if (source.builtin && source.builtin !== 'afk' && source.bucket_ids.length === 0) {
+    const bucketIds =
+      source.builtin === 'window'
+        ? findWindowBucketIds(buckets, host)
+        : source.builtin === 'browser'
+        ? findBrowserBucketIds(buckets, host)
+        : findStopwatchBucketIds(buckets, host);
+    const usesUnknownFallback = bucketIds.some(
+      bucketId => bucketHost(buckets.find(bucket => bucket.id === bucketId)) === 'unknown'
+    );
+    const materialized: CompiledActiveSourceV2 = {
+      ...source,
+      bucket_ids: bucketIds,
+      scope: usesUnknownFallback ? 'global' : 'host',
+      ...(usesUnknownFallback ? {} : { host }),
     };
+    if (usesUnknownFallback) delete materialized.host;
+    return materialized;
   }
   return { ...source, bucket_ids: [...source.bucket_ids] };
 }
@@ -133,38 +161,19 @@ export function materializeActivityQueryV2(
   const afkBucketIds = findAfkBucketIds(buckets, host);
 
   const activityCoverage = compiled.activity_coverage_sources
-    .map(source => materializeCoverageSource(source, windowBucketIds, host))
+    .map(source => materializeCoverageSource(source, buckets, host))
     .filter(source => source.bucket_ids.length > 0);
 
   const contextSources = compiled.context_sources
-    .map(source => materializeContextSource(source, windowBucketIds, host))
+    .map(source => materializeContextSource(source, buckets, host))
     .filter(source => source.bucket_ids.length > 0);
-
-  if (
-    input.includeStopwatch &&
-    !activityCoverage.some(source => source.source_id === STOPWATCH_SOURCE_ID)
-  ) {
-    const stopwatchBucketIds = findStopwatchBucketIds(buckets, host);
-    if (stopwatchBucketIds.length > 0) {
-      const usesUnknownFallback = stopwatchBucketIds.every(
-        bucketId => bucketHost(buckets.find(bucket => bucket.id === bucketId)) === 'unknown'
-      );
-      activityCoverage.push({
-        source_id: STOPWATCH_SOURCE_ID,
-        bucket_ids: stopwatchBucketIds,
-        scope: usesUnknownFallback ? 'global' : 'host',
-        fields: ['label'],
-        ...(usesUnknownFallback ? {} : { host }),
-      });
-    }
-  }
 
   let activeTimeRule: RuleExpressionV2 | undefined = compiled.active_time_rule
     ? (JSON.parse(JSON.stringify(compiled.active_time_rule)) as RuleExpressionV2)
     : undefined;
-  let activeTimeSources: CompiledActiveSourceV2[] = compiled.active_time_sources
-    .map(source => materializeActiveSource(source, windowBucketIds, host))
-    .filter(source => source.bucket_ids.length > 0);
+  let activeTimeSources: CompiledActiveSourceV2[] = compiled.active_time_sources.map(source =>
+    materializeActiveSource(source, buckets, host)
+  );
 
   if (!activeTimeRule && compiled.legacy_active_time) {
     const branches: RuleExpressionV2[] = [];

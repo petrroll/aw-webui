@@ -248,6 +248,8 @@ export default {
         '默认的“应用与窗口”数据源。ActivityWatch 会自动解析每台设备的窗口 bucket。在高级模式下，可像其他数据源一样重命名、重新指向或移除它；AFK 在“活跃时间”中配置。',
       builtinWindowBucketsHelp:
         '留空以自动发现每台设备的窗口 bucket，或填写精确的 bucket ID 以覆盖。',
+      builtinDetectedBucketsHelp:
+        '系统会自动检测每台设备上的 bucket。仅在需要覆盖自动检测时填写精确的 bucket ID。',
       builtinWindowDiscoveredBucket: '自动发现：{bucket} — 设备：{host}',
       builtinWindowFieldsHelp: '选择“应用与窗口”规则可使用的字段。默认字段为 app 和 title。',
       noActivityCreatingSourceWarning:

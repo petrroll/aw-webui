@@ -4,7 +4,7 @@ import { setActivePinia, createPinia } from 'pinia';
 import { useCategoryStore } from '~/stores/categories';
 import { useSettingsStore } from '~/stores/settings';
 import { createMissingParents, defaultCategories, Category } from '~/util/classes';
-import { defaultBuiltinWindowSource } from '~/util/rulesV2';
+import { defaultBuiltinSources } from '~/util/rulesV2';
 
 describe('categories store', () => {
   setActivePinia(createPinia());
@@ -179,7 +179,7 @@ describe('categories store', () => {
 
     categoryStore.queueV2Sources(sources, []);
 
-    expect(categoryStore.pendingV2Sources).toEqual([defaultBuiltinWindowSource(), ...sources]);
+    expect(categoryStore.pendingV2Sources).toEqual([...defaultBuiltinSources(), ...sources]);
     expect(categoryStore.classes_unsaved_changes).toBe(true);
   });
 

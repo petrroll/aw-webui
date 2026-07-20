@@ -187,7 +187,10 @@ export const useSettingsStore = defineStore('settings', {
       );
       if (
         profile.sources.some(
-          source => !source.builtin && (categorySourceIds.has(source.id) || source.creates_activity)
+          source =>
+            source.builtin !== 'window' &&
+            (categorySourceIds.has(source.id) ||
+              (source.creates_activity && source.builtin !== 'stopwatch'))
         ) &&
         !capabilities.includes('query.merge_subwatcher_fields.source_namespace.v1')
       ) {
