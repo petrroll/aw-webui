@@ -309,6 +309,10 @@ export default {
       sourceScopeHostHelp: 'Die Gerätezuordnung folgt den Watcher-Metadaten.',
       removeSource: 'Quelle entfernen',
       addSource: 'Quelle hinzufügen',
+      quickAddSources: 'Integrierte oder erkannte Quelle hinzufügen:',
+      addBuiltinWindowSource: 'App & Fenster hinzufügen',
+      addBuiltinBrowserSource: 'Browser-Tabs hinzufügen',
+      addBuiltinStopwatchSource: 'Stoppuhr hinzufügen',
       winningScore: 'Gewinnergewichtung',
       previewSummary: '{matched} Kategorien passend, {lost} unterlegen',
       weightHelp:
@@ -605,6 +609,9 @@ export default {
     swimlanes: 'Schwimmbahnen:',
     filterAfk: 'AFK filtern',
     mergeByApp: 'Nach App zusammenführen',
+    noCategoryActivitySource:
+      'Kategoriezeile ausgeblendet: Keine konfigurierte Quelle kann Aktivitätszeiträume erzeugen.',
+    categoryResultUnavailable: 'Die Kategoriezeile ist für die ausgewählten Daten nicht verfügbar.',
     noEvents: 'Keine Ereignisse entsprechen den Kriterien. Zeitleiste nicht aktualisiert.',
     scrollHint: 'Scrollen zum Zoomen, Wischen zum Schwenken, Pfeiltasten zur Navigation',
     loading: 'Laden…',

@@ -2,10 +2,43 @@ import {
   buildTimelineCategoryColorResolver,
   buildTimelineCategoryQuery,
   filterTimelineBucketsByPeriods,
+  hostCanResolveTimelineCategory,
   splitCategoryEventsByActivity,
 } from '~/util/timelineCategories';
 
 describe('timeline category activity slices', () => {
+  test('a capable v2 profile does not admit a stray window bucket as coverage', () => {
+    const buckets = [
+      {
+        id: 'aw-watcher-window_test',
+        hostname: 'test',
+        device_id: 'test',
+        type: 'currentwindow',
+        data: {},
+      },
+    ];
+    const compiledV2 = {
+      category_specs: [],
+      context_sources: [],
+      activity_coverage_sources: [],
+      active_time_sources: [],
+      capabilities: [],
+    };
+
+    expect(
+      hostCanResolveTimelineCategory({
+        host: 'test',
+        buckets: buckets as any,
+        compiledV2,
+      })
+    ).toBe(false);
+    expect(
+      hostCanResolveTimelineCategory({
+        host: 'test',
+        buckets: buckets as any,
+      })
+    ).toBe(true);
+  });
   test('resolves configured and inherited colors from the canonical category set', () => {
     const categoryColor = buildTimelineCategoryColorResolver({
       schema_version: 2,
@@ -209,6 +242,47 @@ describe('timeline category activity slices', () => {
         data: { desktop: 'Personal' },
       },
     ]);
+  });
+
+  test('AFK filtering leaves hosts without a resolved category mask untouched', () => {
+    const unresolvedHostBuckets = [
+      {
+        hostname: 'laptop',
+        type: 'currentwindow',
+        events: [
+          {
+            timestamp: '2026-07-18T12:00:00.000Z',
+            duration: 60,
+            data: { app: 'Code' },
+          },
+        ],
+      },
+      {
+        hostname: 'laptop',
+        type: 'afkstatus',
+        events: [
+          {
+            timestamp: '2026-07-18T12:00:00.000Z',
+            duration: 60,
+            data: { status: 'afk' },
+          },
+        ],
+      },
+    ];
+
+    expect(
+      filterTimelineBucketsByPeriods(
+        unresolvedHostBuckets,
+        [
+          {
+            hostname: 'desktop',
+            type: 'category-result',
+            events: [],
+          },
+        ],
+        { activeOnly: true, keepAfkBuckets: false }
+      )
+    ).toEqual(unresolvedHostBuckets);
   });
 
   test('category filtering includes inactive category periods and keeps AFK rows', () => {

@@ -108,6 +108,31 @@ export function createDefaultRuleSource(existingIds: string[]): SourceDefinition
   };
 }
 
+export function createDetectedRuleSource(input: {
+  id: string;
+  label: string;
+  buckets: IBucket[];
+  fields: string[];
+  createsActivity?: boolean;
+}): SourceDefinitionV2 {
+  const ownedBuckets = input.buckets.filter(
+    bucket => bucket.hostname && bucket.hostname !== 'unknown'
+  );
+  const selectedBuckets = ownedBuckets.length > 0 ? ownedBuckets : input.buckets;
+  const bucketIds = selectedBuckets.map(bucket => bucket.id);
+  const ownership = resolveBucketOwnership(bucketIds, selectedBuckets);
+  const useGlobalScope = ownership.unresolved.length > 0;
+  return {
+    id: input.id,
+    label: input.label,
+    bucket_ids: bucketIds,
+    scope: useGlobalScope ? 'global' : 'host',
+    ...(useGlobalScope ? {} : { bucket_hosts: ownership.bucketHosts }),
+    fields: [...input.fields],
+    ...(input.createsActivity ? { creates_activity: true } : {}),
+  };
+}
+
 export function formatRulesValidationError(
   error: string,
   sources: SourceDefinitionV2[],

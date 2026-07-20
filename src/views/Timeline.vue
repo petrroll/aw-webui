@@ -17,16 +17,20 @@ div
             th.pt-2.pr-3
               label(for="timeline-filter-host") Host:
             td
-              select#timeline-filter-host.form-control.form-control-sm(v-model="filter_hostname")
-                option(:value='null') All
-                option(v-for="host in hosts", :value="host") {{ host }}
+              timeline-filter-select#timeline-filter-host(
+                v-model="filter_hostnames"
+                :options="host_options"
+                aria-label="Host"
+              )
           tr
             th.pt-2.pr-3
               label(for="timeline-filter-client") Client:
             td
-              select#timeline-filter-client.form-control.form-control-sm(v-model="filter_client")
-                option(:value='null') All
-                option(v-for="client in clients", :value="client") {{ client }}
+              timeline-filter-select#timeline-filter-client(
+                v-model="filter_clients"
+                :options="client_options"
+                aria-label="Client"
+              )
           tr
             th.pt-2.pr-3
               label(for="timeline-filter-duration") Duration:
@@ -50,23 +54,6 @@ div
             td
               b-form-checkbox(v-model="filter_afk" size="sm" switch)
                 | {{ $t('timeline.filterAfk') }}
-          tr
-            th.pt-2.pr-3
-              label Merge:
-            td
-              b-form-checkbox(v-model="filter_merge_similar" size="sm" switch)
-                | {{ $t('timeline.mergeByApp') }}
-          tr
-            th.pt-2.pr-3
-              label(for="timeline-filter-categories") Categories:
-            td
-              select#timeline-filter-categories.form-control.form-control-sm(@change="onCategorySelect($event)", :value="''")
-                option(value="" disabled) {{ filter_categories.length > 0 ? 'Add category...' : 'All' }}
-                option(v-for="cat in category_options", :key="cat.text", :value="cat.text") {{ cat.text }}
-              div.mt-1(v-if="filter_categories.length > 0")
-                span.badge.badge-info.mr-1(v-for="(cat, idx) in filter_categories", :key="idx")
-                  | {{ cat.join(' > ') }}
-                  button.ml-1.close.small(@click="removeCategory(idx)", type="button", aria-label="Remove category", style="font-size: 0.85rem; line-height: 1") &times;
 
     // Display options (swimlanes, future visual toggles) tucked behind a
     // ghost kebab so they don't compete visually with Filters.
@@ -81,6 +68,12 @@ div
     )
       template(v-slot:button-content)
         icon(name="ellipsis-v")
+      b-dropdown-header Display
+      b-dropdown-item-button(
+        :active="filter_merge_similar"
+        @click="filter_merge_similar = !filter_merge_similar"
+      ) {{ $t('timeline.mergeByApp') }}
+      b-dropdown-divider
       b-dropdown-header Swimlanes
       b-dropdown-item-button(
         v-for="opt in swimlaneOptions"
@@ -95,10 +88,17 @@ div
     small.text-muted.mr-3(v-if="hasCategoryResult")
       | {{ $t('timeline.inactiveLegend') }}
 
+    small.text-warning.mr-3(v-else-if="categoryResultMessage")
+      | {{ categoryResultMessage }}
+
     small.text-muted.ml-auto
       | {{ $t('timeline.scrollHint') }}
 
-  b-alert.mb-2(v-if="buckets !== null && num_events === 0", variant="warning", show)
+  b-alert.mb-2(
+    v-if="buckets !== null && num_events === 0 && !hasCategoryResult"
+    variant="warning"
+    show
+  )
     | {{ $t('timeline.noEvents') }}
 
   div(v-if="buckets !== null")
@@ -124,44 +124,42 @@ import { mapState } from 'pinia';
 import { useSettingsStore } from '~/stores/settings';
 import { useBucketsStore } from '~/stores/buckets';
 import { getClient } from '~/util/awclient';
-import {
-  hostCanResolveProfile,
-  hostHasResolvedActiveTime,
-  hostHasResolvedActiveTimeV2,
-} from '~/util/activityProfile';
+import { hostHasResolvedActiveTime, hostHasResolvedActiveTimeV2 } from '~/util/activityProfile';
 import { resolveActivityEventsQuery } from '~/util/activityQuery';
 import { useCategoryStore } from '~/stores/categories';
 import { seconds_to_duration } from '~/util/time';
+import TimelineFilterSelect from '~/components/TimelineFilterSelect.vue';
 import {
   buildTimelineCategoryColorResolver,
   filterTimelineBucketsByPeriods,
+  hostCanResolveTimelineCategory,
   splitCategoryEventsByActivity,
 } from '~/util/timelineCategories';
 
 export default {
   name: 'Timeline',
+  components: { TimelineFilterSelect },
   data() {
     return {
       all_buckets: null,
-      hosts: null,
+      hosts: [],
       buckets: null,
-      clients: null,
+      clients: [],
       daterange: null,
       maxDuration: 31 * 24 * 60 * 60,
-      filter_hostname: null,
-      filter_client: null,
+      filter_hostnames: [],
+      filter_clients: [],
       filter_duration: null,
       filter_afk: false,
-      filter_merge_similar: false,
-      filter_categories: [],
+      filter_merge_similar: true,
       swimlane: null,
       swimlaneOptions: [
         { value: null, text: 'None' },
-        { value: 'category', text: 'Group by category' },
         { value: 'bucketType', text: 'Group by bucket type' },
       ],
       updateTimelineWindow: true,
       loadGeneration: 0,
+      categoryResultMessage: '',
     };
   },
   computed: {
@@ -180,17 +178,23 @@ export default {
         'events.length'
       );
     },
-    category_options() {
-      const categoryStore = useCategoryStore();
-      return categoryStore.allCategoriesSelect;
+    host_options() {
+      return (this.hosts ?? []).map(host => ({ value: host, text: host }));
+    },
+    client_options() {
+      return (this.clients ?? []).map(client => ({ value: client, text: client }));
     },
     filter_summary() {
       const desc = [];
-      if (this.filter_hostname) {
-        desc.push(this.filter_hostname);
+      if (this.filter_hostnames.length === 1) {
+        desc.push(this.filter_hostnames[0]);
+      } else if (this.filter_hostnames.length > 1) {
+        desc.push(`${this.filter_hostnames.length} hosts`);
       }
-      if (this.filter_client) {
-        desc.push(this.filter_client);
+      if (this.filter_clients.length === 1) {
+        desc.push(this.filter_clients[0]);
+      } else if (this.filter_clients.length > 1) {
+        desc.push(`${this.filter_clients.length} clients`);
       }
       if (this.filter_duration > 0) {
         desc.push(seconds_to_duration(this.filter_duration));
@@ -198,17 +202,6 @@ export default {
       if (this.filter_afk) {
         desc.push('AFK filtered');
       }
-      if (this.filter_merge_similar) {
-        desc.push('merged by app');
-      }
-      if (this.filter_categories.length > 0) {
-        desc.push(
-          this.filter_categories.length +
-            ' categor' +
-            (this.filter_categories.length === 1 ? 'y' : 'ies')
-        );
-      }
-
       if (desc.length > 0) {
         return desc.join(', ');
       }
@@ -220,11 +213,11 @@ export default {
       this.updateTimelineWindow = true;
       this.getBuckets();
     },
-    filter_hostname() {
+    filter_hostnames() {
       this.updateTimelineWindow = false;
       this.getBuckets();
     },
-    filter_client() {
+    filter_clients() {
       this.updateTimelineWindow = false;
       this.getBuckets();
     },
@@ -240,27 +233,11 @@ export default {
       this.updateTimelineWindow = false;
       this.getBuckets();
     },
-    filter_categories() {
-      this.updateTimelineWindow = false;
-      this.getBuckets();
-    },
     swimlane() {
       this.updateTimelineWindow = false;
     },
   },
   methods: {
-    onCategorySelect(event) {
-      const text = event.target.value;
-      if (!text) return;
-      const cat = this.category_options.find(c => c.text === text);
-      if (cat && !this.filter_categories.some(fc => _.isEqual(fc, cat.value))) {
-        this.filter_categories = [...this.filter_categories, cat.value];
-      }
-      event.target.value = '';
-    },
-    removeCategory(idx) {
-      this.filter_categories = this.filter_categories.filter((_cat, i) => i !== idx);
-    },
     getBuckets: async function () {
       if (this.daterange == null) return;
 
@@ -273,7 +250,7 @@ export default {
         .map(bucket => bucket.hostname)
         .filter((value, index, array) => value && array.indexOf(value) === index);
 
-      const categoryBucketsPromise = this._queryCategoryResultBuckets();
+      const categoryBucketsPromise = this._queryCategoryResultBuckets(generation);
       const allBuckets = await bucketsStore.getBucketsWithEvents({
         start: this.daterange[0].format(),
         end: this.daterange[1].format(),
@@ -285,11 +262,11 @@ export default {
         .filter((value, index, array) => value && array.indexOf(value) === index);
 
       let buckets = allBuckets;
-      if (this.filter_hostname) {
-        buckets = _.filter(buckets, b => b.hostname == this.filter_hostname);
+      if (this.filter_hostnames.length > 0) {
+        buckets = _.filter(buckets, b => this.filter_hostnames.includes(b.hostname));
       }
-      if (this.filter_client) {
-        buckets = _.filter(buckets, b => b.client == this.filter_client);
+      if (this.filter_clients.length > 0) {
+        buckets = _.filter(buckets, b => this.filter_clients.includes(b.client));
       }
 
       if (this.filter_duration > 0) {
@@ -317,17 +294,7 @@ export default {
         buckets = this._applyMergeSimilar(buckets);
       }
 
-      if (this.filter_categories.length > 0) {
-        buckets = this._filterBucketsByCategoryPeriods(buckets, categoryBuckets);
-      }
       this.buckets = [...categoryBuckets, ...buckets];
-    },
-
-    _filterBucketsByCategoryPeriods: function (buckets, categoryBuckets) {
-      return this._filterBucketsByTimelinePeriods(buckets, categoryBuckets, {
-        activeOnly: false,
-        keepAfkBuckets: true,
-      });
     },
 
     _filterBucketsByTimelinePeriods: function (
@@ -341,23 +308,36 @@ export default {
       });
     },
 
-    async _queryCategoryResultBuckets() {
+    async _queryCategoryResultBuckets(generation) {
       const bucketsStore = useBucketsStore();
       const settingsStore = useSettingsStore();
       const categoryStore = useCategoryStore();
-      const visibleHosts = this.filter_hostname ? [this.filter_hostname] : this.hosts;
+      if (generation === this.loadGeneration) this.categoryResultMessage = '';
+      const visibleHosts = this.filter_hostnames.length > 0 ? this.filter_hostnames : this.hosts;
       const advanced = settingsStore.compiledRulesV2;
+      const compiledV2 = settingsStore.compiledActivityQueryV2;
       const eligibleHosts = visibleHosts.filter(hostname =>
-        hostCanResolveProfile({
+        hostCanResolveTimelineCategory({
           host: hostname,
           buckets: bucketsStore.buckets,
-          compiled: advanced,
-          filterAfk: false,
+          compiledV2,
+          compiledLegacy: advanced,
         })
       );
-      const categoryColor = buildTimelineCategoryColorResolver(
-        settingsStore.rulesV2.category_sets_v2[0]
-      );
+      if (eligibleHosts.length === 0) {
+        if (generation === this.loadGeneration) {
+          this.categoryResultMessage = String(this.$t('timeline.noCategoryActivitySource'));
+        }
+        return [];
+      }
+      const categorySet = settingsStore.rulesV2.category_sets_v2[0];
+      if (!categorySet) {
+        if (generation === this.loadGeneration) {
+          this.categoryResultMessage = String(this.$t('timeline.categoryResultUnavailable'));
+        }
+        return [];
+      }
+      const categoryColor = buildTimelineCategoryColorResolver(categorySet);
       const results = await Promise.all(
         eligibleHosts.map(async hostname => {
           const windowBucketIds = bucketsStore.bucketsWindow(hostname);
@@ -374,8 +354,7 @@ export default {
               host: hostname,
               v2: {
                 filter_afk: false,
-                filter_categories:
-                  this.filter_categories.length > 0 ? this.filter_categories : null,
+                filter_categories: null,
                 include_audible:
                   activeTime?.type === 'legacy' ? activeTime.include_audible : undefined,
               },
@@ -390,8 +369,7 @@ export default {
                   activeTime?.type === 'legacy' ? activeTime.include_audible : undefined,
                 always_active_pattern: this.always_active_pattern || undefined,
                 categories: categoryStore.classes_for_query,
-                filter_categories:
-                  this.filter_categories.length > 0 ? this.filter_categories : null,
+                filter_categories: null,
                 ...(advanced ?? {}),
               },
               returnStatement: timelineReturn,
@@ -443,7 +421,11 @@ export default {
         })
       );
 
-      return results.filter(Boolean);
+      const categoryBuckets = results.filter(Boolean);
+      if (categoryBuckets.length === 0 && generation === this.loadGeneration) {
+        this.categoryResultMessage = String(this.$t('timeline.categoryResultUnavailable'));
+      }
+      return categoryBuckets;
     },
 
     // Merges adjacent events with the same app name within window buckets.

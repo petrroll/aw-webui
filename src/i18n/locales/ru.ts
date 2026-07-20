@@ -309,6 +309,10 @@ export default {
       sourceScopeHostHelp: 'Принадлежность устройству определяется метаданными наблюдателя.',
       removeSource: 'Удалить источник',
       addSource: 'Добавить источник',
+      quickAddSources: 'Добавить встроенный или обнаруженный источник:',
+      addBuiltinWindowSource: 'Добавить приложение и окно',
+      addBuiltinBrowserSource: 'Добавить вкладки браузера',
+      addBuiltinStopwatchSource: 'Добавить секундомер',
       winningScore: 'Итоговый вес',
       previewSummary: 'Совпало категорий: {matched}, проиграло: {lost}',
       weightHelp:
@@ -601,6 +605,9 @@ export default {
     swimlanes: 'Дорожки:',
     filterAfk: 'Фильтр AFK',
     mergeByApp: 'Объединить по приложению',
+    noCategoryActivitySource:
+      'Строка категорий скрыта: ни один настроенный источник не создает периоды активности.',
+    categoryResultUnavailable: 'Строка категорий недоступна для выбранных данных.',
     noEvents: 'Нет событий по выбранным критериям. Хронология не обновлена.',
     scrollHint:
       'Колёсико — масштаб, свайп/горизонтальная прокрутка — панорама, стрелки — навигация',

@@ -2,6 +2,17 @@
 div
   b-alert(variant="warning" :show="!hasActivityCreator")
     | {{ $t('settings.categorization.noActivityCreatingSourceWarning') }}
+  div.mb-2(v-if="quickAddSources.length > 0")
+    small.text-muted.d-block.mb-1
+      | {{ $t('settings.categorization.quickAddSources') }}
+    b-btn.mr-1.mb-1(
+      v-for="preset in quickAddSources"
+      :key="preset.id"
+      size="sm"
+      variant="outline-primary"
+      @click="addPreset(preset.id)"
+    )
+      | {{ preset.label }}
   div.border.rounded.p-2.mb-2(v-for="(source, index) in value" :key="index")
     b-form-row
       b-col
@@ -87,8 +98,12 @@ div
 </template>
 
 <script lang="ts">
-import type { SourceDefinitionV2 } from '~/util/rulesV2';
-import { createDefaultRuleSource, resolveBucketOwnership } from '~/util/rulesEditor';
+import { defaultBuiltinWindowSource, type SourceDefinitionV2 } from '~/util/rulesV2';
+import {
+  createDefaultRuleSource,
+  createDetectedRuleSource,
+  resolveBucketOwnership,
+} from '~/util/rulesEditor';
 import { useBucketsStore } from '~/stores/buckets';
 import { useServerStore } from '~/stores/server';
 
@@ -119,6 +134,35 @@ export default {
       return this.bucketsStore.buckets.filter(
         bucket => bucket.type === 'currentwindow' && !bucket.id.startsWith('aw-watcher-android')
       );
+    },
+    quickAddSources() {
+      const sources = this.value as SourceDefinitionV2[];
+      const presets = [];
+      if (!sources.some(source => source.builtin === 'window')) {
+        presets.push({
+          id: 'window',
+          label: this.$t('settings.categorization.addBuiltinWindowSource'),
+        });
+      }
+      if (this.browserBuckets.length > 0 && !sources.some(source => source.id === 'browser')) {
+        presets.push({
+          id: 'browser',
+          label: this.$t('settings.categorization.addBuiltinBrowserSource'),
+        });
+      }
+      if (this.stopwatchBuckets.length > 0 && !sources.some(source => source.id === 'stopwatch')) {
+        presets.push({
+          id: 'stopwatch',
+          label: this.$t('settings.categorization.addBuiltinStopwatchSource'),
+        });
+      }
+      return presets;
+    },
+    browserBuckets() {
+      return this.bucketsStore.buckets.filter(bucket => bucket.type === 'web.tab.current');
+    },
+    stopwatchBuckets() {
+      return this.bucketsStore.buckets.filter(bucket => bucket.type === 'general.stopwatch');
     },
   },
   methods: {
@@ -206,6 +250,28 @@ export default {
     },
     add() {
       this.emitValue([...this.value, createDefaultRuleSource(this.value.map(source => source.id))]);
+    },
+    addPreset(id: 'window' | 'browser' | 'stopwatch') {
+      let source: SourceDefinitionV2;
+      if (id === 'window') {
+        source = defaultBuiltinWindowSource();
+      } else if (id === 'browser') {
+        source = createDetectedRuleSource({
+          id: 'browser',
+          label: String(this.$t('settings.categorization.bucketLabelBrowser')),
+          buckets: this.browserBuckets,
+          fields: ['title', 'url', 'audible', 'incognito', 'tabCount'],
+        });
+      } else {
+        source = createDetectedRuleSource({
+          id: 'stopwatch',
+          label: String(this.$t('settings.categorization.bucketLabelStopwatch')),
+          buckets: this.stopwatchBuckets,
+          fields: ['label'],
+          createsActivity: true,
+        });
+      }
+      this.emitValue([...this.value, source]);
     },
     remove(index: number) {
       this.emitValue(this.value.filter((_, sourceIndex) => sourceIndex !== index));

@@ -1,6 +1,7 @@
 import {
   buildParentRequirementOptions,
   convertRuleExpressionType,
+  createDetectedRuleSource,
   createDefaultRuleSource,
   formatRulesValidationError,
   resolveBucketOwnership,
@@ -149,6 +150,72 @@ describe('rules editor state transitions', () => {
     expect(source.id).toBe('source-1');
     expect(source).not.toHaveProperty('role');
     expect(source).not.toHaveProperty('activity_mode');
+  });
+
+  test('detected sources preserve ownership and unknown-host fallback scope', () => {
+    const browser = createDetectedRuleSource({
+      id: 'browser',
+      label: 'Browser tabs',
+      buckets: [
+        {
+          id: 'browser-laptop',
+          hostname: 'Laptop',
+          device_id: 'laptop',
+          type: 'web.tab.current',
+          data: {},
+        },
+      ],
+      fields: ['title', 'url'],
+    });
+    expect(browser).toMatchObject({
+      scope: 'host',
+      bucket_hosts: { 'browser-laptop': 'Laptop' },
+    });
+
+    const browserWithFallback = createDetectedRuleSource({
+      id: 'browser',
+      label: 'Browser tabs',
+      buckets: [
+        {
+          id: 'browser-laptop',
+          hostname: 'Laptop',
+          device_id: 'laptop',
+          type: 'web.tab.current',
+          data: {},
+        },
+        {
+          id: 'browser-unknown',
+          hostname: 'unknown',
+          device_id: 'unknown',
+          type: 'web.tab.current',
+          data: {},
+        },
+      ],
+      fields: ['title', 'url'],
+    });
+    expect(browserWithFallback.bucket_ids).toEqual(['browser-laptop']);
+    expect(browserWithFallback).toMatchObject({
+      scope: 'host',
+      bucket_hosts: { 'browser-laptop': 'Laptop' },
+    });
+
+    const stopwatch = createDetectedRuleSource({
+      id: 'stopwatch',
+      label: 'Stopwatch',
+      buckets: [
+        {
+          id: 'aw-stopwatch',
+          hostname: 'unknown',
+          device_id: 'unknown',
+          type: 'general.stopwatch',
+          data: {},
+        },
+      ],
+      fields: ['label'],
+      createsActivity: true,
+    });
+    expect(stopwatch).toMatchObject({ scope: 'global', creates_activity: true });
+    expect(stopwatch).not.toHaveProperty('bucket_hosts');
   });
 
   test('formats source validation errors with the user-facing source label', () => {

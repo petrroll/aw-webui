@@ -302,6 +302,10 @@ export default {
       sourceScopeHostHelp: 'Device ownership follows watcher metadata.',
       removeSource: 'Remove source',
       addSource: 'Add source',
+      quickAddSources: 'Add a built-in or detected source:',
+      addBuiltinWindowSource: 'Add App & window',
+      addBuiltinBrowserSource: 'Add browser tabs',
+      addBuiltinStopwatchSource: 'Add stopwatch',
       winningScore: 'Winning score',
       previewSummary: '{matched} categories matched, {lost} lost',
       weightHelp:
@@ -596,6 +600,9 @@ export default {
     swimlanes: 'Swimlanes:',
     filterAfk: 'Filter AFK',
     mergeByApp: 'Merge by app',
+    noCategoryActivitySource:
+      'Category row hidden: no configured source can create activity periods.',
+    categoryResultUnavailable: 'Category row unavailable for the selected data.',
     noEvents: 'No events match selected criteria. Timeline is not updated.',
     scrollHint: 'Scroll to zoom, swipe/horizontal-scroll to pan, arrow keys to navigate',
     loading: 'Loading...',

@@ -1,7 +1,14 @@
 import type { IEvent } from '~/util/interfaces';
 import { createMissingParents } from '~/util/classes';
 import { getColorFromCategory } from '~/util/color';
-import { categorySetToLegacyClasses, type CategorySetV2 } from '~/util/rulesV2';
+import {
+  categorySetToLegacyClasses,
+  type CategorySetV2,
+  type CompiledActivityQueryV2,
+  type CompiledProfileQueryOptions,
+} from '~/util/rulesV2';
+import { hostCanResolveProfile, hostHasResolvedActivityV2 } from '~/util/activityProfile';
+import type { IBucket } from '~/util/interfaces';
 
 interface Interval {
   start: number;
@@ -18,6 +25,22 @@ interface TimelineBucket {
 interface TimelinePeriodFilterOptions {
   activeOnly: boolean;
   keepAfkBuckets: boolean;
+}
+
+export function hostCanResolveTimelineCategory(input: {
+  host: string;
+  buckets: IBucket[];
+  compiledV2?: CompiledActivityQueryV2;
+  compiledLegacy?: CompiledProfileQueryOptions;
+}): boolean {
+  return input.compiledV2
+    ? hostHasResolvedActivityV2(input.host, input.buckets, input.compiledV2)
+    : hostCanResolveProfile({
+        host: input.host,
+        buckets: input.buckets,
+        compiled: input.compiledLegacy,
+        filterAfk: false,
+      });
 }
 
 export function buildTimelineCategoryQuery(canonicalQuery: string): string {
@@ -183,6 +206,7 @@ export function filterTimelineBucketsByPeriods(
   }
 
   return buckets.flatMap(bucket => {
+    if (!periodsByHost.has(bucket.hostname)) return [bucket];
     if (bucket.type === 'afkstatus') return keepAfkBuckets ? [bucket] : [];
     const periods = periodsByHost.get(bucket.hostname) ?? [];
     let periodIndex = 0;

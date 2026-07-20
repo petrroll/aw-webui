@@ -140,7 +140,10 @@ export function materializeActivityQueryV2(
     .map(source => materializeContextSource(source, windowBucketIds, host))
     .filter(source => source.bucket_ids.length > 0);
 
-  if (input.includeStopwatch) {
+  if (
+    input.includeStopwatch &&
+    !activityCoverage.some(source => source.source_id === STOPWATCH_SOURCE_ID)
+  ) {
     const stopwatchBucketIds = findStopwatchBucketIds(buckets, host);
     if (stopwatchBucketIds.length > 0) {
       const usesUnknownFallback = stopwatchBucketIds.every(

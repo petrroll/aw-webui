@@ -304,6 +304,10 @@ export default {
       sourceScopeHostHelp: 'Належність пристрою визначається метаданими спостерігача.',
       removeSource: 'Видалити джерело',
       addSource: 'Додати джерело',
+      quickAddSources: 'Додати вбудоване або виявлене джерело:',
+      addBuiltinWindowSource: 'Додати програму й вікно',
+      addBuiltinBrowserSource: 'Додати вкладки браузера',
+      addBuiltinStopwatchSource: 'Додати секундомір',
       winningScore: 'Підсумкова вага',
       previewSummary: 'Збіглося категорій: {matched}, програло: {lost}',
       weightHelp:
@@ -596,6 +600,9 @@ export default {
     swimlanes: 'Доріжки:',
     filterAfk: 'Фільтр AFK',
     mergeByApp: 'Об’єднати за застосунком',
+    noCategoryActivitySource:
+      'Рядок категорій приховано: жодне налаштоване джерело не створює періоди активності.',
+    categoryResultUnavailable: 'Рядок категорій недоступний для вибраних даних.',
     noEvents: 'Немає подій за обраними критеріями. Хронологію не оновлено.',
     scrollHint:
       'Коліщатко — масштаб, свайп/горизонтальна прокрутка — панорама, стрілки — навігація',
