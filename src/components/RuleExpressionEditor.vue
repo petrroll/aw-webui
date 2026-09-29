@@ -135,6 +135,16 @@ div.rule-expression-editor.border.rounded.p-3.mb-2(:class="{ 'rule-group': isGro
         switch
       )
         | {{ $t('settings.categorization.excludeMatches') }}
+      b-form-group.value-mode.mb-2(
+        v-if="showAdvancedOptions"
+        :label="$t('settings.categorization.valueMode')"
+      )
+        b-form-select(
+          size="sm"
+          :value="effectiveValueMode"
+          :options="valueModeOptions"
+          @input="updateValueMode"
+        )
       b-form-group.match-weight.mb-2(v-if="showAdvancedOptions")
         template(#label)
           | {{ $t('settings.categorization.priorityWeight') }}
@@ -149,6 +159,8 @@ div.rule-expression-editor.border.rounded.p-3.mb-2(:class="{ 'rule-group': isGro
           size="sm"
           type="number"
           step="1"
+          :min="MIN_RULE_RANK"
+          :max="MAX_RULE_RANK"
           :value="value.weight || 0"
           :state="weightState"
           @input="updateWeight"
@@ -196,15 +208,27 @@ div.rule-expression-editor.border.rounded.p-3.mb-2(:class="{ 'rule-group': isGro
 
 <script lang="ts">
 import _ from 'lodash';
+import type { PropType } from 'vue';
 import { useBucketsStore } from '~/stores/buckets';
 import { useSettingsStore } from '~/stores/settings';
 import type { IBucket, IEvent } from '~/util/interfaces';
-import type { RuleExpressionV2, SourceDefinitionV2 } from '~/util/rulesV2';
+import {
+  MIN_RULE_RANK,
+  MAX_RULE_RANK,
+  effectiveRuleSelector,
+  type RuleExpressionV2,
+  type SourceDefinitionV2,
+} from '~/util/rulesV2';
 import { validateRegex } from '~/util/validate';
 import {
   convertRuleExpressionType,
+  effectiveSourceFieldTypes,
+  formatSourceOwnership,
+  hideBuiltinWindowSource,
+  persistedRuleValueMode,
   resetRegexToAutomatic,
   resolveBucketOwnership,
+  selectorForSourceChange,
 } from '~/util/rulesEditor';
 
 import 'vue-awesome/icons/info-circle';
@@ -276,9 +300,12 @@ function maximumScore(expression: RuleExpressionV2): number {
 export default {
   name: 'RuleExpressionEditor',
   props: {
-    value: { type: Object, required: true },
+    value: { type: Object as PropType<RuleExpressionV2>, required: true },
     allowNone: { type: Boolean, default: true },
-    sourceDefinitions: { type: Array, default: null },
+    sourceDefinitions: {
+      type: Array as PropType<SourceDefinitionV2[] | null>,
+      default: null,
+    },
     allowBucketSources: { type: Boolean, default: false },
     requireSource: { type: Boolean, default: false },
     allowActivityCreation: { type: Boolean, default: false },
@@ -286,6 +313,8 @@ export default {
   },
   data() {
     return {
+      MIN_RULE_RANK,
+      MAX_RULE_RANK,
       settingsStore: useSettingsStore(),
       bucketsStore: useBucketsStore(),
       sourceLoading: false,
@@ -302,7 +331,11 @@ export default {
     },
     weightState(): boolean | null {
       if (this.value.type !== 'regex' || this.value.weight === undefined) return null;
-      return Number.isInteger(this.value.weight) ? null : false;
+      return Number.isInteger(this.value.weight) &&
+        this.value.weight >= MIN_RULE_RANK &&
+        this.value.weight <= MAX_RULE_RANK
+        ? null
+        : false;
     },
     isGroup(): boolean {
       return this.value.type === 'all' || this.value.type === 'any';
@@ -323,7 +356,7 @@ export default {
       return Object.entries(groups)
         .map(([key, buckets]) => ({
           key,
-          label: bucketLabel(buckets[0], key => String(this.$t(key))),
+          label: bucketLabel(buckets[0], translationKey => String(this.$t(translationKey))),
           buckets: _.sortBy(buckets, bucket => bucket.hostname || ''),
         }))
         .sort((left, right) => left.label.localeCompare(right.label));
@@ -369,8 +402,11 @@ export default {
               text: String(this.$t('settings.categorization.mainActivityAdvanced')),
             },
           ];
+      // The friendly unsourced option already aliases builtin_window. List the
+      // other configured builtins alongside custom sources so selecting browser
+      // or stopwatch never creates a duplicate watcher source.
       const customSources = this.effectiveSources.filter(
-        source => !source.auto_generated && !source.builtin
+        source => !source.auto_generated && !hideBuiltinWindowSource(source, this.requireSource)
       );
       if (customSources.length) {
         options.push({
@@ -415,6 +451,7 @@ export default {
         !this.value.source &&
         !this.value.field &&
         (!this.value.fields || this.value.fields.length === 0) &&
+        (!this.value.select_keys || this.value.select_keys.length === 0) &&
         !this.value.host &&
         !this.value.negate &&
         (this.value.weight === undefined || this.value.weight === 0) &&
@@ -429,27 +466,19 @@ export default {
     },
     selectedSourceDetails(): string {
       if (!this.selectedSource) return '';
-      const configuredHosts = _.uniq(
-        Object.values(this.selectedSource.bucket_hosts ?? {}).filter(
-          host => !!host && host !== 'unknown'
-        )
+      const ownership = formatSourceOwnership(this.selectedSource, (key, values) =>
+        String(this.$t(key, values))
       );
-      const availability = configuredHosts.length
-        ? this.$t('settings.categorization.sourceAvailableOn', {
-            hosts: configuredHosts.join(', '),
-          })
-        : this.$t('settings.categorization.sourceDeviceUnknown');
       const ruleHost = this.value.host || this.$t('settings.categorization.anyHost');
       return String(
         this.$t('settings.categorization.sourceWatcherDetails', {
-          availability,
+          ownership,
           host: ruleHost,
         })
       );
     },
     selectedFields(): string[] {
-      if (Array.isArray(this.value.fields)) return [...this.value.fields];
-      return this.value.field ? [this.value.field] : [];
+      return this.value.type === 'regex' ? effectiveRuleSelector(this.value) : [];
     },
     fieldSelectionMode(): 'all' | 'specific' {
       return this.selectedFields.length ? 'specific' : 'all';
@@ -466,6 +495,19 @@ export default {
         },
       ];
     },
+    effectiveFieldTypes(): Record<string, 'string' | 'scalar'> {
+      if (!this.selectedSource) return {};
+      return effectiveSourceFieldTypes(this.selectedSource);
+    },
+    effectiveValueMode(): 'string' | 'scalar' {
+      return persistedRuleValueMode(this.value);
+    },
+    valueModeOptions(): Array<{ value: 'string' | 'scalar'; text: string }> {
+      return [
+        { value: 'string', text: String(this.$t('settings.categorization.stringField')) },
+        { value: 'scalar', text: String(this.$t('settings.categorization.scalarField')) },
+      ];
+    },
     fieldSuggestions(): string[] {
       return _.uniq([
         ...(this.selectedSource?.fields ?? DEFAULT_FIELDS),
@@ -476,7 +518,7 @@ export default {
       return this.fieldSuggestions.map(field => ({
         value: field,
         text:
-          this.selectedSource?.field_types?.[field] === 'scalar'
+          this.effectiveFieldTypes[field] === 'scalar'
             ? `${field} (${this.$t('settings.categorization.scalarField')})`
             : field,
         disabled: this.selectedFields.length === 1 && this.selectedFields[0] === field,
@@ -551,16 +593,11 @@ export default {
       if (source === BASE_ADVANCED_VALUE) {
         this.forceBaseAdvanced = true;
         delete expression.source;
-        const fields = Array.isArray(expression.fields)
-          ? expression.fields
-          : expression.field
-          ? [expression.field]
-          : [];
-        const compatibleFields = fields.filter(field => DEFAULT_FIELDS.includes(field));
+        const fields = selectorForSourceChange(expression, DEFAULT_FIELDS, DEFAULT_FIELDS);
         delete expression.field;
-        if (fields.length) {
-          expression.fields = compatibleFields.length ? compatibleFields : [...DEFAULT_FIELDS];
-        }
+        delete expression.select_keys;
+        if (fields.length) expression.fields = fields;
+        else delete expression.fields;
         delete expression.value_mode;
         this.emitValue(expression as RuleExpressionV2);
         return;
@@ -597,25 +634,16 @@ export default {
       if (!selectedSource) return;
 
       expression.source = selectedSource.id;
-      const fields = Array.isArray(expression.fields)
-        ? expression.fields
-        : expression.field
-        ? [expression.field]
-        : [];
-      const compatibleFields = selectedSource
-        ? fields.filter(field => selectedSource.fields.includes(field))
-        : fields;
-      const selectedFields =
-        fields.length && compatibleFields.length === 0
-          ? selectedSource.fields.filter(field => selectedSource.field_types?.[field] !== 'scalar')
-          : compatibleFields;
-      if (fields.length && selectedFields.length === 0) {
-        selectedFields.push(...selectedSource.fields.slice(0, 1));
-      }
+      const selectedFieldTypes = effectiveSourceFieldTypes(selectedSource);
+      const textFields = selectedSource.fields.filter(
+        field => selectedFieldTypes[field] !== 'scalar'
+      );
+      const selectedFields = selectorForSourceChange(expression, selectedSource.fields, textFields);
       delete expression.field;
+      delete expression.select_keys;
       if (selectedFields.length) expression.fields = selectedFields;
       else delete expression.fields;
-      if (selectedFields.some(field => selectedSource.field_types?.[field] === 'scalar')) {
+      if (selectedFields.some(field => selectedFieldTypes[field] === 'scalar')) {
         expression.value_mode = 'scalar';
       } else {
         delete expression.value_mode;
@@ -625,9 +653,10 @@ export default {
     updateFields(fields: string[]) {
       const expression = { ...this.value };
       delete expression.field;
+      delete expression.select_keys;
       if (fields.length) expression.fields = fields;
       else delete expression.fields;
-      if (fields.some(field => this.selectedSource?.field_types?.[field] === 'scalar')) {
+      if (fields.some(field => this.effectiveFieldTypes[field] === 'scalar')) {
         expression.value_mode = 'scalar';
       } else {
         delete expression.value_mode;
@@ -640,7 +669,7 @@ export default {
         return;
       }
       const textFields = this.fieldSuggestions.filter(
-        field => this.selectedSource?.field_types?.[field] !== 'scalar'
+        field => this.effectiveFieldTypes[field] !== 'scalar'
       );
       this.updateFields(textFields.length ? textFields : this.fieldSuggestions.slice(0, 1));
     },
@@ -655,7 +684,20 @@ export default {
       const matchingSources = this.effectiveSources.filter(source =>
         _.isEqual([...source.bucket_ids].sort(), [...bucketIds].sort())
       );
-      const existing = matchingSources.find(source => source.auto_generated) ?? matchingSources[0];
+      const discoveredBuiltin = this.effectiveSources.find(source => {
+        if (source.bucket_ids.length > 0) return false;
+        if (source.builtin === 'browser') {
+          return buckets.every(bucket => bucket.type === 'web.tab.current');
+        }
+        if (source.builtin === 'stopwatch') {
+          return buckets.every(bucket => bucket.type === 'general.stopwatch');
+        }
+        return false;
+      });
+      const existing =
+        discoveredBuiltin ??
+        matchingSources.find(source => source.auto_generated) ??
+        matchingSources[0];
       if (existing) return existing;
 
       const failedBuckets: string[] = [];
@@ -713,6 +755,7 @@ export default {
         scope: 'host',
         bucket_hosts: ownership.bucketHosts,
         fields,
+        interval_policy: 'exact',
         ...(Object.keys(fieldTypes).length ? { field_types: fieldTypes } : {}),
         auto_generated: true,
       };
@@ -736,9 +779,15 @@ export default {
       }
       this.$emit('sources-input', updated);
     },
+    updateValueMode(value: 'string' | 'scalar') {
+      const expression = { ...this.value };
+      if (value === 'scalar') expression.value_mode = 'scalar';
+      else delete expression.value_mode;
+      this.emitValue(expression as RuleExpressionV2);
+    },
     updateWeight(value: string | number) {
       const parsed = Number(value);
-      this.update('weight', Number.isFinite(parsed) ? Math.trunc(parsed) : 0);
+      this.update('weight', Number.isFinite(parsed) ? parsed : 0);
     },
     updateChild(index: number, child: RuleExpressionV2) {
       const rules = [...this.value.rules];
@@ -782,6 +831,7 @@ export default {
   margin-bottom: 0.25rem;
 }
 
+.value-mode,
 .match-weight {
   width: 11rem;
   margin-left: auto;

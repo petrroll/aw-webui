@@ -82,11 +82,15 @@ import Papa from 'papaparse';
 
 import 'vue-awesome/icons/search';
 import 'vue-awesome/icons/spinner';
+import 'vue-awesome/icons/save';
 import 'vue-awesome/icons/angle-double-down';
 import 'vue-awesome/icons/angle-double-up';
 
-import { resolveActivityEventsQuery } from '~/util/activityQuery';
-import { BUILTIN_WINDOW_SOURCE_ID } from '~/util/rulesV2';
+import {
+  buildReportSearchActivityQueryV2,
+  projectMaterializedEventsForPresentation,
+  resolveActivityEventsQuery,
+} from '~/util/activityQuery';
 import { buildBarchartDataset } from '~/util/datasets';
 
 import { useActivityStore } from '~/stores/activity';
@@ -133,71 +137,52 @@ export default {
   },
   methods: {
     generate: async function () {
-      // TODO: use full query (one per day/timeperiod) instead of resolving each period separately
-      const settingsStore = useSettingsStore();
-      const compiled = settingsStore.compiledRulesV2;
-      const customRule = this.filterCategories.find(category => category[0][0] === 'searched');
-      const profileSources = settingsStore.rulesV2.activity_profiles_v2[0]?.sources ?? [];
-      const searchableSources = profileSources.filter(source => source.builtin !== 'window');
-      const coverageSourceIds = new Set(
-        compiled?.activity_coverage_sources.map(source => source.source_id) ?? []
-      );
-      const reportContextSources = searchableSources
-        .filter(source => !coverageSourceIds.has(source.id))
-        .map(source => ({
-          source_id: source.id,
-          bucket_ids: source.bucket_ids,
-          scope: source.scope,
-          bucket_hosts: source.bucket_hosts,
-          fields: source.fields,
-          conflict: 'base_wins' as const,
-          host: source.host,
-        }));
-      const searchableSourceIds = searchableSources.map(source => source.id);
-      const v2SearchRule = customRule
-        ? {
-            type: 'any' as const,
-            rules: [
-              {
-                type: 'regex' as const,
-                source: BUILTIN_WINDOW_SOURCE_ID,
-                regex: customRule[1].regex,
-                ignore_case: customRule[1].ignore_case,
-              },
-              ...searchableSourceIds.map(source => ({
-                type: 'regex' as const,
-                source,
-                regex: customRule[1].regex,
-                ignore_case: customRule[1].ignore_case,
-              })),
-            ],
-          }
-        : undefined;
-      const { query: query_array } = resolveActivityEventsQuery({
-        host: this.queryOptions.hostname,
-        filter_afk: this.queryOptions.filter_afk,
-        v2: {
-          filter_afk: this.queryOptions.filter_afk,
-          filter_categories: this.filterCategories.map(c => c[0]),
-          category_specs: v2SearchRule
-            ? [{ id: 'report-search', name: ['searched'], rule: v2SearchRule }]
-            : undefined,
-          extra_context_sources: customRule ? reportContextSources : undefined,
-        },
-      });
-      const start = moment(this.queryOptions.start).format();
-      const end = moment(this.queryOptions.stop).format();
-      const timeperiods = [start + '/' + end];
       try {
         this.status = 'searching';
+        const settingsStore = useSettingsStore();
+        const customRule = this.filterCategories.find(category => category[0][0] === 'searched');
+        const profile = settingsStore.rulesV2.activity_profiles_v2[0];
+        const commonInput = {
+          host: this.queryOptions.hostname,
+          buckets: this.bucketsStore.buckets,
+          compiledV2: settingsStore.compiledActivityQueryV2,
+          filter_afk: this.queryOptions.filter_afk,
+        };
+        const built = customRule
+          ? buildReportSearchActivityQueryV2({
+              ...commonInput,
+              configuredSources: profile?.sources ?? [],
+              regex: customRule[1].regex,
+              ignoreCase: customRule[1].ignore_case,
+            })
+          : resolveActivityEventsQuery({
+              host: this.queryOptions.hostname,
+              filter_afk: this.queryOptions.filter_afk,
+              v2: {
+                filter_afk: this.queryOptions.filter_afk,
+                filter_categories: this.filterCategories.map(c => c[0]),
+              },
+            });
+        const start = moment(this.queryOptions.start).format();
+        const end = moment(this.queryOptions.stop).format();
+        const timeperiods = [start + '/' + end];
         const time = moment();
-        const data = await getClient().query(timeperiods, query_array);
-        this.events = _.orderBy(data[0], ['timestamp'], ['desc']);
+        const data = await getClient().query(timeperiods, built.query);
+        this.events = _.orderBy(
+          projectMaterializedEventsForPresentation(data[0], built.materialized),
+          ['timestamp'],
+          ['desc']
+        );
         this.error = '';
         this.queryTime = moment().diff(time);
       } catch (e) {
         console.error(e);
-        this.error = e.response.data.message;
+        this.error =
+          e instanceof Error
+            ? e.message
+            : String(
+                (e as { response?: { data?: { message?: unknown } } })?.response?.data?.message ?? e
+              );
       } finally {
         this.status = null;
       }

@@ -60,7 +60,8 @@ import 'vue-awesome/icons/edit';
 import CategoryEditModal from './CategoryEditModal.vue';
 import { useCategoryStore } from '~/stores/categories';
 import { useSettingsStore } from '~/stores/settings';
-import { findCategoryRuleV2, legacyRuleToV2, type RuleExpressionV2 } from '~/util/rulesV2';
+import { effectiveRuleSelector, legacyRuleToV2, type RuleExpressionV2 } from '~/util/rulesV2';
+import { findCategoryRuleV2 } from '~/util/rulesV2Editor';
 
 import _ from 'lodash';
 
@@ -98,7 +99,8 @@ export default {
       const category = findCategoryRuleV2(
         rules.activity_profiles_v2[0],
         rules.category_sets_v2,
-        canonicalName
+        canonicalName,
+        this.categoryStore.editable_category_set_id ?? undefined
       );
       const pendingEdit = this.categoryStore.pendingV2Edit(category?.id, this._class.name);
       return pendingEdit?.rule ?? category?.rule ?? legacyRuleToV2(this._class.rule);
@@ -142,7 +144,7 @@ export default {
               }`
             );
           }
-          const fields = expression.fields ?? (expression.field ? [expression.field] : []);
+          const fields = effectiveRuleSelector(expression);
           if (fields.length) {
             details.push(
               `${this.$t('settings.categorization.ruleSummaryFields')}: ${fields.join(', ')}`

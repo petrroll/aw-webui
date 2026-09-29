@@ -1,5 +1,5 @@
 import _ from 'lodash';
-import { Category, matchString, loadClasses } from './classes';
+import { Category } from './classes';
 import Color from 'color';
 import * as d3 from 'd3';
 import { IEvent, IBucket } from './interfaces';
@@ -85,30 +85,6 @@ export function getColorFromCategory(c: Category, allCats: Category[]): string {
   }
 }
 
-// TODO: Move into vuex?
-export function getCategoryColorFromString(str: string): string {
-  // TODO: Don't load classes on every call
-  const allCats = loadClasses();
-  const c = matchString(str, allCats);
-  if (c !== null) {
-    return getColorFromCategory(c, allCats);
-  } else {
-    return fallbackColor(str);
-  }
-}
-
-function fallbackColor(str: string): string {
-  // Get fallback color
-  // TODO: Fetch setting from somewhere better, where defaults are respected
-  const useColorFallback =
-    localStorage !== undefined ? localStorage.useColorFallback === 'true' : true;
-  if (useColorFallback) {
-    return getColorFromString(str);
-  } else {
-    return COLOR_UNCAT;
-  }
-}
-
 export function getTitleAttr(bucket: { type?: string }, e: IEvent) {
   if (bucket.type == 'currentwindow') {
     return e.data.app;
@@ -138,35 +114,6 @@ export function getTitleAttr(bucket: { type?: string }, e: IEvent) {
 
     return '';
   }
-}
-
-export function getCategorizationStringFromEvent(bucket: IBucket, e: IEvent): string | null {
-  if (bucket.type == 'currentwindow') {
-    // using linebreak and "m" regex flag to make `$` and `^` work
-    return e.data.app + '\n' + e.data.title;
-  } else if (bucket.type == 'web.tab.current') {
-    // same as above
-    return e.data.title + '\n' + e.data.url;
-  } else if (bucket.type?.startsWith('app.editor')) {
-    return e.data.file;
-  } else if (bucket.type?.startsWith('general.stopwatch')) {
-    return e.data.label;
-  }
-
-  return null;
-}
-
-export function getCategoryColorFromEvent(bucket: IBucket, e: IEvent) {
-  const categorizationString = getCategorizationStringFromEvent(bucket, e);
-  if (categorizationString !== null) {
-    return getCategoryColorFromString(categorizationString);
-  }
-
-  if (bucket.type == 'afkstatus') {
-    return getColorFromString(e.data.status);
-  }
-
-  return getColorFromString(getTitleAttr(bucket, e));
 }
 
 export function getRawColorFromEvent(bucket: IBucket, e: IEvent) {

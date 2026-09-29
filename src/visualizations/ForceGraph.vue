@@ -33,7 +33,6 @@ export default {
   },
   methods: {
     drawGraph({ nodes, links }) {
-      console.log('rendering...');
       this.cancelPromise && this.cancelPromise();
       const promise = new Promise(resolve => {
         this.cancelPromise = resolve;
@@ -46,7 +45,6 @@ export default {
       svg.selectAll('*').remove();
       //append
       svg.node().appendChild(svgEl);
-      console.log('drawn!');
     },
   },
 };

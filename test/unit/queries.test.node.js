@@ -13,7 +13,7 @@ const queryParams = {
   bid_browsers,
   filter_afk,
   categories: [],
-  filter_categories: true,
+  filter_categories: [],
   include_audible: true,
   always_active_pattern,
 };
@@ -43,9 +43,6 @@ test('generate fullDesktopQuery', () => {
   expect(query).toMatchSnapshot();
   expectBracketsClosed(query);
 
-  query = queries.activityQuery([bid_afk]).join('\n');
-  expect(query).toMatchSnapshot();
-  expectBracketsClosed(query);
 });
 
 test('materializes configured browser and stopwatch builtins from legacy bucket parameters', () => {

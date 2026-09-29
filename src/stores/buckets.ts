@@ -51,7 +51,6 @@ export const useBucketsStore = defineStore('buckets', {
             hostHasResolvedActiveTimeV2(host, state.buckets, compiledV2, {
               includeAudible:
                 activeTime?.type === 'legacy' ? activeTime.include_audible : undefined,
-              browserBucketIds: this.bucketsBrowser(host),
             })
               ? 1
               : 0,
@@ -87,7 +86,6 @@ export const useBucketsStore = defineStore('buckets', {
           !!compiledV2 &&
           hostHasResolvedActiveTimeV2(hostname, state.buckets, compiledV2, {
             includeAudible: activeTime?.type === 'legacy' ? activeTime.include_audible : undefined,
-            browserBucketIds: this.bucketsBrowser(hostname),
           });
         const androidAvail = this.bucketsAndroid(hostname).length > 0;
 

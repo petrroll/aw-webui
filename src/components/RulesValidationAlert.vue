@@ -6,19 +6,20 @@ b-alert(:show="formattedErrors.length > 0" variant="danger")
 </template>
 
 <script lang="ts">
+import type { PropType } from 'vue';
 import type { SourceDefinitionV2 } from '~/util/rulesV2';
 import { formatRulesValidationError } from '~/util/rulesEditor';
 
 export default {
   name: 'RulesValidationAlert',
   props: {
-    errors: { type: Array, default: () => [] },
-    sources: { type: Array, default: () => [] },
+    errors: { type: Array as PropType<string[]>, default: () => [] },
+    sources: { type: Array as PropType<SourceDefinitionV2[]>, default: () => [] },
   },
   computed: {
     formattedErrors(): string[] {
       return [
-        ...new Set(
+        ...new Set<string>(
           (this.errors as string[]).map(error =>
             formatRulesValidationError(error, this.sources as SourceDefinitionV2[], (key, values) =>
               String(this.$t(key, values))

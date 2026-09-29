@@ -9,8 +9,12 @@
 // substituting legacy dashboard results.
 
 import type { IBucket, IEvent } from '~/util/interfaces';
-import type { CompiledActivityQueryV2 } from '~/util/rulesV2';
-import { materializeActivityQueryV2 } from '~/util/materializeV2';
+import type { CompiledActivityQueryV2, RuleExpressionV2, SourceDefinitionV2 } from '~/util/rulesV2';
+import {
+  materializeActivityQueryV2,
+  materializeConfiguredBrowserSource,
+  materializeConfiguredContextSources,
+} from '~/util/materializeV2';
 import { useSettingsStore } from '~/stores/settings';
 import { useBucketsStore } from '~/stores/buckets';
 import {
@@ -19,6 +23,7 @@ import {
   fullActivityMultiQueryV2,
   queryStringToArray,
   type CanonicalQueryParamsV2,
+  type ActivityReportParamsV2,
   type CategorySpecV2,
   type ActivityCoverageSource,
   type ContextSource,
@@ -35,7 +40,6 @@ export interface HostActivityInput {
   filter_categories?: string[][] | null;
   include_stopwatch?: boolean;
   include_audible?: boolean;
-  browser_bucket_ids?: string[];
   explain_categories?: boolean;
   return_variable_suffix?: string;
   // Overrides the compiled category specs (e.g. a synthetic "searched" category).
@@ -51,12 +55,12 @@ export interface MaterializedHostActivity {
   appTitleSourceId?: string;
   browserFocusSourceId?: string;
   stopwatchSourceId?: string;
+  browserSource?: ActivityCoverageSource;
 }
 
-// The app/title presentation projection is drawn from a configured coverage
-// source whose flat fields include both app and title. The default window source
-// (builtin_window) is preferred when it is actually configured, but any other
-// source qualifies. When none exists the app/title summaries are simply empty.
+// The app/title presentation projection is drawn only from the explicitly
+// configured source when that materialized source exposes both fields. When it
+// is unavailable, app/title summaries are empty for that host.
 export function selectAppTitleSourceId(
   params: CanonicalQueryParamsV2,
   configuredSourceId?: string
@@ -69,10 +73,9 @@ export function selectAppTitleSourceId(
     ?.source_id;
 }
 
-// Browser focus is derived from an explicit configured source whose flat fields
-// include app. The default window source is preferred only if it is configured;
-// otherwise the first source with an app field is used, and if none exists
-// browser results are simply unavailable. Never a canonical root app field.
+// Browser focus is derived only from the explicit configured source when its
+// materialized fields include app. It never falls back to another source or to
+// a canonical root app field.
 export function selectBrowserFocusSourceId(
   params: CanonicalQueryParamsV2,
   configuredSourceId?: string
@@ -110,7 +113,6 @@ export function materializeHostActivityV2(
     explainCategories: input.explain_categories,
     includeStopwatch: input.include_stopwatch,
     includeAudible: input.include_audible,
-    browserBucketIds: input.browser_bucket_ids,
     returnVariableSuffix: input.return_variable_suffix,
   });
   if (input.category_specs !== undefined) {
@@ -127,6 +129,7 @@ export function materializeHostActivityV2(
       input.compiledV2.browser_focus_source_id
     ),
     stopwatchSourceId: selectStopwatchSourceId(params, input.include_stopwatch),
+    browserSource: materializeConfiguredBrowserSource(input.compiledV2, input.buckets, input.host),
   };
 }
 
@@ -159,7 +162,6 @@ export function resolveActivityEventsQuery(opts: {
     filter_afk: opts.v2?.filter_afk ?? opts.filter_afk,
     filter_categories: opts.v2?.filter_categories ?? null,
     include_audible: opts.v2?.include_audible,
-    browser_bucket_ids: bucketsStore.bucketsBrowser(opts.host),
     explain_categories: opts.v2?.explain_categories,
     return_variable_suffix: opts.v2?.return_variable_suffix,
     category_specs: opts.v2?.category_specs,
@@ -188,6 +190,67 @@ export function buildActivityEventsQuery(opts: {
   throw new Error(ACTIVITY_V2_UNSUPPORTED_ERROR);
 }
 
+export function buildReportSearchActivityQueryV2(
+  input: HostActivityInput & {
+    configuredSources: SourceDefinitionV2[];
+    regex: string;
+    ignoreCase?: boolean;
+  }
+): { query: string[]; materialized: MaterializedHostActivity } {
+  const materialized = materializeHostActivityV2(input);
+  if (!materialized) throw new Error(ACTIVITY_V2_UNSUPPORTED_ERROR);
+
+  const params = materialized.params;
+  const existingIds = new Set(
+    [...(params.activity_coverage_sources ?? []), ...(params.context_sources ?? [])].map(
+      source => source.source_id
+    )
+  );
+  const additionalContext = materializeConfiguredContextSources(
+    input.configuredSources.filter(source => !existingIds.has(source.id)),
+    input.buckets,
+    input.host
+  );
+  for (const source of additionalContext) {
+    if (existingIds.has(source.source_id)) continue;
+    existingIds.add(source.source_id);
+    (params.context_sources ??= []).push(source);
+  }
+
+  const searchableSources = [
+    ...(params.activity_coverage_sources ?? []),
+    ...(params.context_sources ?? []),
+  ].filter((source, index, all) => {
+    return all.findIndex(candidate => candidate.source_id === source.source_id) === index;
+  });
+  const configuredById = new Map(input.configuredSources.map(source => [source.id, source]));
+  const rules: RuleExpressionV2[] = searchableSources.flatMap(source =>
+    source.fields.map(field => ({
+      type: 'regex' as const,
+      source: source.source_id,
+      field,
+      regex: input.regex,
+      ...(configuredById.get(source.source_id)?.field_types?.[field]
+        ? { value_mode: configuredById.get(source.source_id)?.field_types?.[field] }
+        : {}),
+      ...(input.ignoreCase !== undefined ? { ignore_case: input.ignoreCase } : {}),
+    }))
+  );
+  params.category_specs = [
+    {
+      id: 'report-search',
+      name: ['searched'],
+      rule: rules.length === 0 ? { type: 'none' } : { type: 'any', rules },
+    },
+  ];
+  params.filter_categories = [['searched']];
+
+  return {
+    query: queryStringToArray(`${resolveActivityProfileV2(params)}\nRETURN = events;`),
+    materialized,
+  };
+}
+
 // Builds the full activity report query (generic `activity` section, browser and
 // stopwatch sections). Returns the projection source IDs so the caller can remap
 // the flat `$source.<id>.app/title` keys back onto plain `app`/`title` for
@@ -201,33 +264,42 @@ export function buildFullActivityQueryV2(
     ...materialized.params,
     app_title_source_id: materialized.appTitleSourceId,
     browser_focus_source_id: materialized.browserFocusSourceId,
-    browser_bucket_ids: input.browser_bucket_ids,
+    browser_source: materialized.browserSource,
     stopwatch_source_id: materialized.stopwatchSourceId,
   });
   return { query, materialized };
 }
 
-// Multi-device variant: materializes each host and unions the results. Returns
-// the shared projection source IDs (identical across hosts) so the caller can
-// remap the flat namespaced keys at the store boundary.
+// Multi-device variant: materializes each host, resolves browser facts against
+// that host's focus stream, then applies one shared host-precedence union. The
+// returned projection selects the first host that actually materialized each
+// configured presentation source, rather than assuming the first host did.
 export function buildFullActivityMultiQueryV2(
   inputs: HostActivityInput[]
 ): { query: string[]; materialized: MaterializedHostActivity } | null {
-  const materializedList = inputs
-    .map(input => materializeHostActivityV2(input))
-    .filter((m): m is MaterializedHostActivity => m !== null);
-  if (materializedList.length === 0) return null;
-  const projection = materializedList[0];
-  const browserBucketIds = inputs.flatMap(input => input.browser_bucket_ids ?? []);
-  const query = fullActivityMultiQueryV2(
-    materializedList.map(m => m.params),
-    {
-      app_title_source_id: projection.appTitleSourceId,
-      browser_focus_source_id: projection.browserFocusSourceId,
-      browser_bucket_ids: browserBucketIds,
-      stopwatch_source_id: projection.stopwatchSourceId,
-    }
-  );
+  const materializedInputs = inputs
+    .map(input => ({ input, materialized: materializeHostActivityV2(input) }))
+    .filter(
+      (entry): entry is { input: HostActivityInput; materialized: MaterializedHostActivity } =>
+        entry.materialized !== null
+    );
+  if (materializedInputs.length === 0) return null;
+  const materializedList = materializedInputs.map(entry => entry.materialized);
+  const first = materializedList[0];
+  const projection: MaterializedHostActivity = {
+    params: first.params,
+    appTitleSourceId: materializedList.find(m => m.appTitleSourceId)?.appTitleSourceId,
+    browserFocusSourceId: materializedList.find(m => m.browserFocusSourceId)?.browserFocusSourceId,
+    stopwatchSourceId: materializedList.find(m => m.stopwatchSourceId)?.stopwatchSourceId,
+  };
+  const reportParams: ActivityReportParamsV2[] = materializedInputs.map(({ materialized }) => ({
+    ...materialized.params,
+    app_title_source_id: materialized.appTitleSourceId,
+    browser_focus_source_id: materialized.browserFocusSourceId,
+    browser_source: materialized.browserSource,
+    stopwatch_source_id: materialized.stopwatchSourceId,
+  }));
+  const query = fullActivityMultiQueryV2(reportParams);
   return { query, materialized: projection };
 }
 
@@ -256,7 +328,6 @@ export function materializeHostsV2(
         filter_categories: opts.filter_categories ?? null,
         include_audible: opts.include_audible,
         include_stopwatch: opts.include_stopwatch,
-        browser_bucket_ids: bucketsStore.bucketsBrowser(host),
       })
     )
     .filter((m): m is MaterializedHostActivity => m !== null);
@@ -269,6 +340,13 @@ export function materializeHostsV2(
 // keep working without depending on the map_event_fields capability. When no
 // projection source is configured the events are returned unchanged (already
 // empty in that case).
+export function projectMaterializedEventsForPresentation(
+  events: IEvent[] | undefined,
+  materialized: MaterializedHostActivity | null | undefined
+): IEvent[] {
+  return remapNamespacedAppTitle(events, materialized?.appTitleSourceId);
+}
+
 export function remapNamespacedAppTitle(
   events: IEvent[] | undefined,
   sourceId: string | undefined

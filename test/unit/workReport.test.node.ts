@@ -69,21 +69,14 @@ describe('workReport host helpers', () => {
     // respond with HTTP 400 "Tried to call function flood with invalid amount
     // of arguments" and broke the whole report.
     const query = buildWorkReportQuery(queryParams(['laptop']), []);
-    expect(query).toContain(
-      'legacy_activity = flood(query_bucket("aw-watcher-window_laptop"))'
-    );
-    expect(query).toContain(
-      'not_afk = flood(query_bucket("aw-watcher-afk_laptop"))'
-    );
+    expect(query).toContain('legacy_activity = flood(query_bucket("aw-watcher-window_laptop"))');
+    expect(query).toContain('not_afk = flood(query_bucket("aw-watcher-afk_laptop"))');
     // Must NOT contain flood() with two arguments
     expect(query).not.toMatch(/flood\([^)]+,[^)]+\)/);
   });
 
   test('buildWorkReportQuery produces a snapshot-stable query for multiple hosts', () => {
-    const query = buildWorkReportQuery(
-      queryParams(['laptop', 'desktop']),
-      [['Work']]
-    );
+    const query = buildWorkReportQuery(queryParams(['laptop', 'desktop']), [['Work']]);
     expect(query).toMatchSnapshot();
   });
 
@@ -106,9 +99,9 @@ describe('workReport host helpers', () => {
       },
     ];
 
-    expect(
-      getSupportedWorkReportHosts(['desktop', 'phone', 'laptop'], moreBuckets as any)
-    ).toEqual([]);
+    expect(getSupportedWorkReportHosts(['desktop', 'phone', 'laptop'], moreBuckets as any)).toEqual(
+      []
+    );
   });
 
   test('supports a host resolved entirely from configured generic sources', () => {
@@ -158,10 +151,13 @@ describe('workReport host helpers', () => {
         'query.categorize_v2.v1',
         'query.merge_subwatcher_fields.source_namespace.v1',
         'query.active_periods_v2.v1',
+        'query.query_bucket_optional_raw.v1',
+        'query.query_period.v1',
+        'query.flood_v2.v1',
       ],
     };
 
-    expect(getWorkReportHostOptions(genericBuckets as any, undefined, compiledV2)).toEqual([
+    expect(getWorkReportHostOptions(genericBuckets as any, compiledV2)).toEqual([
       { value: 'custom', text: 'custom', disabled: false },
     ]);
 
@@ -169,8 +165,8 @@ describe('workReport host helpers', () => {
       [{ ...compiledV2, hostname: 'custom', filter_categories: [] }],
       []
     );
-    expect(query).toContain('query_bucket_optional("custom-activity")');
-    expect(query).toContain('query_bucket_optional("custom-active")');
+    expect(query).toContain('query_bucket_optional_raw("custom-activity", "custom")');
+    expect(query).toContain('query_bucket_optional_raw("custom-active", "custom")');
     expect(query).not.toContain('aw-watcher-window');
     expect(query).not.toContain('aw-watcher-afk');
   });
@@ -221,15 +217,15 @@ describe('workReport host helpers', () => {
       capabilities: [],
     };
 
-    expect(getWorkReportHostOptions(genericBuckets as any, undefined, compiledV2)).toEqual([
+    expect(getWorkReportHostOptions(genericBuckets as any, compiledV2)).toEqual([
       { value: 'custom', text: 'custom', disabled: false },
     ]);
-    expect(
-      getSupportedWorkReportHosts(['custom'], genericBuckets as any, undefined, compiledV2)
-    ).toEqual(['custom']);
+    expect(getSupportedWorkReportHosts(['custom'], genericBuckets as any, compiledV2)).toEqual([
+      'custom',
+    ]);
   });
 
-  test('v2 audible eligibility uses an unknown-host browser fallback', () => {
+  test('v2 audible eligibility requires a configured browser-focus source', () => {
     const fallbackBuckets = [
       {
         id: 'custom-activity',
@@ -259,6 +255,14 @@ describe('workReport host helpers', () => {
         },
       ],
       active_time_sources: [],
+      browser_source: {
+        source_id: 'browser',
+        builtin: 'browser' as const,
+        bucket_ids: [],
+        scope: 'host' as const,
+        fields: ['url', 'title', 'audible'],
+        interval_policy: 'heartbeat' as const,
+      },
       legacy_active_time: {
         use_afk: false,
         include_audible: true,
@@ -267,8 +271,40 @@ describe('workReport host helpers', () => {
       capabilities: [],
     };
 
+    expect(getWorkReportHostOptions(fallbackBuckets as any, compiledV2, true)).toEqual([
+      {
+        value: 'custom',
+        text: 'custom (requires an active-time source)',
+        disabled: true,
+      },
+    ]);
+
+    const focusedCompiledV2 = {
+      ...compiledV2,
+      browser_focus_source_id: 'focus',
+      context_sources: [
+        {
+          source_id: 'focus',
+          bucket_ids: ['custom-focus'],
+          scope: 'host' as const,
+          bucket_hosts: { 'custom-focus': 'custom' },
+          fields: ['app'],
+          conflict: 'base_wins' as const,
+        },
+      ],
+    };
+    const focusedBuckets = [
+      ...fallbackBuckets,
+      {
+        id: 'custom-focus',
+        hostname: 'custom',
+        device_id: 'custom',
+        type: 'currentwindow',
+        data: {},
+      },
+    ];
     expect(
-      getWorkReportHostOptions(fallbackBuckets as any, undefined, compiledV2, true)
+      getWorkReportHostOptions(focusedBuckets as any, focusedCompiledV2, true)
     ).toEqual([{ value: 'custom', text: 'custom', disabled: false }]);
   });
 });

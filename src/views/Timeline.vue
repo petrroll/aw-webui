@@ -54,6 +54,25 @@ div
             td
               b-form-checkbox(v-model="filter_afk" size="sm" switch)
                 | {{ $t('timeline.filterAfk') }}
+          tr
+            th.pt-2.pr-3
+              label(for="timeline-filter-categories") Categories:
+            td
+              select#timeline-filter-categories.form-control.form-control-sm(
+                @change="onCategorySelect($event)"
+                :value="''"
+              )
+                option(value="" disabled) {{ filter_categories.length ? 'Add category...' : 'All' }}
+                option(v-for="cat in category_options" :key="cat.text" :value="cat.text") {{ cat.text }}
+              div.mt-1(v-if="filter_categories.length")
+                span.badge.badge-info.mr-1(v-for="(cat, idx) in filter_categories" :key="cat.join('>')")
+                  | {{ cat.join(' > ') }}
+                  button.ml-1.close.small(
+                    @click="removeCategory(idx)"
+                    type="button"
+                    aria-label="Remove category"
+                    style="font-size: 0.85rem; line-height: 1"
+                  ) &times;
 
     // Display options (swimlanes, future visual toggles) tucked behind a
     // ghost kebab so they don't compete visually with Filters.
@@ -123,6 +142,7 @@ import _ from 'lodash';
 import { mapState } from 'pinia';
 import { useSettingsStore } from '~/stores/settings';
 import { useBucketsStore } from '~/stores/buckets';
+import { useCategoryStore } from '~/stores/categories';
 import { getClient } from '~/util/awclient';
 import { hostHasResolvedActiveTimeV2 } from '~/util/activityProfile';
 import { resolveActivityEventsQuery } from '~/util/activityQuery';
@@ -150,7 +170,8 @@ export default {
       filter_clients: [],
       filter_duration: null,
       filter_afk: false,
-      filter_merge_similar: true,
+      filter_merge_similar: false,
+      filter_categories: [],
       swimlane: null,
       swimlaneOptions: [
         { value: null, text: 'None' },
@@ -183,6 +204,9 @@ export default {
     client_options() {
       return (this.clients ?? []).map(client => ({ value: client, text: client }));
     },
+    category_options() {
+      return useCategoryStore().allCategoriesSelect;
+    },
     filter_summary() {
       const desc = [];
       if (this.filter_hostnames.length === 1) {
@@ -200,6 +224,13 @@ export default {
       }
       if (this.filter_afk) {
         desc.push('AFK filtered');
+      }
+      if (this.filter_categories.length > 0) {
+        desc.push(
+          `${this.filter_categories.length} categor${
+            this.filter_categories.length === 1 ? 'y' : 'ies'
+          }`
+        );
       }
       if (desc.length > 0) {
         return desc.join(', ');
@@ -232,11 +263,26 @@ export default {
       this.updateTimelineWindow = false;
       this.getBuckets();
     },
+    filter_categories() {
+      this.updateTimelineWindow = false;
+      this.getBuckets();
+    },
     swimlane() {
       this.updateTimelineWindow = false;
     },
   },
   methods: {
+    onCategorySelect(event) {
+      const text = event.target.value;
+      const option = this.category_options.find(candidate => candidate.text === text);
+      if (option && !this.filter_categories.some(category => _.isEqual(category, option.value))) {
+        this.filter_categories = [...this.filter_categories, option.value];
+      }
+      event.target.value = '';
+    },
+    removeCategory(index) {
+      this.filter_categories = this.filter_categories.filter((_category, i) => i !== index);
+    },
     getBuckets: async function () {
       if (this.daterange == null) return;
 
@@ -278,9 +324,9 @@ export default {
       const categoryBuckets = await categoryBucketsPromise;
       if (generation !== this.loadGeneration) return;
 
-      if (this.filter_afk) {
+      if (this.filter_afk || this.filter_categories.length > 0) {
         buckets = this._filterBucketsByTimelinePeriods(buckets, categoryBuckets, {
-          activeOnly: true,
+          activeOnly: this.filter_afk,
           keepAfkBuckets: false,
         });
       }
@@ -334,14 +380,21 @@ export default {
         }
         return [];
       }
-      const categorySet = settingsStore.rulesV2.category_sets_v2[0];
-      if (!categorySet) {
+      const rules = settingsStore.rulesV2;
+      const selectedSets = (rules.activity_profiles_v2[0]?.category_set_ids ?? [])
+        .map(id => rules.category_sets_v2.find(set => set.id === id))
+        .filter(Boolean);
+      if (selectedSets.length === 0) {
         if (generation === this.loadGeneration) {
           this.categoryResultMessage = String(this.$t('timeline.categoryResultUnavailable'));
         }
         return [];
       }
-      const categoryColor = buildTimelineCategoryColorResolver(categorySet);
+      const categoryColor = buildTimelineCategoryColorResolver({
+        schema_version: 2,
+        id: '__timeline_composed__',
+        categories: selectedSets.flatMap(set => set.categories),
+      });
       const results = await Promise.all(
         eligibleHosts.map(async hostname => {
           try {
@@ -372,10 +425,17 @@ export default {
               {
                 includeAudible:
                   activeTime?.type === 'legacy' ? activeTime.include_audible : undefined,
-                browserBucketIds: bucketsStore.bucketsBrowser(hostname),
               }
             );
-            const categoryEvents = result.all ?? [];
+            const allCategoryEvents = result.all ?? [];
+            const categoryEvents = this.filter_categories.length
+              ? allCategoryEvents.filter(event => {
+                  const category = event.data?.['$category'] ?? ['Uncategorized'];
+                  return this.filter_categories.some(selected =>
+                    selected.every((segment, index) => category[index] === segment)
+                  );
+                })
+              : allCategoryEvents;
             const activeEvents = hasActiveTime ? result.active ?? [] : categoryEvents;
             const events = splitCategoryEventsByActivity(categoryEvents, activeEvents).map(
               event => {

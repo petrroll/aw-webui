@@ -1,5 +1,97 @@
-import type { CategoryRuleV2, RuleExpressionV2, SourceDefinitionV2 } from '~/util/rulesV2';
+import {
+  effectiveRuleSelector,
+  type CategoryRuleV2,
+  type RuleExpressionV2,
+  type SourceDefinitionV2,
+} from '~/util/rulesV2';
 import type { IBucket } from '~/util/interfaces';
+
+type Translate = (key: string, values?: Record<string, unknown>) => string;
+
+const BUILTIN_FIELD_TYPES: Partial<
+  Record<NonNullable<SourceDefinitionV2['builtin']>, Record<string, 'string' | 'scalar'>>
+> = {
+  browser: {
+    title: 'string',
+    url: 'string',
+    audible: 'scalar',
+    incognito: 'scalar',
+    tabCount: 'scalar',
+  },
+};
+
+export function selectorForSourceChange(
+  rule: RuleExpressionV2,
+  availableFields: string[],
+  fallbackFields: string[]
+): string[] {
+  if (rule.type !== 'regex') return [];
+  const selector = effectiveRuleSelector(rule);
+  if (selector.length === 0) return [];
+  const compatible = selector.filter(field => availableFields.includes(field));
+  if (compatible.length > 0) return compatible;
+  return fallbackFields.length > 0 ? [...fallbackFields] : availableFields.slice(0, 1);
+}
+
+export function persistedRuleValueMode(rule: RuleExpressionV2): 'string' | 'scalar' {
+  return rule.type === 'regex' ? rule.value_mode ?? 'string' : 'string';
+}
+
+export function effectiveSourceFieldTypes(
+  source: SourceDefinitionV2 | undefined
+): Record<string, 'string' | 'scalar'> {
+  if (!source) return {};
+  return {
+    ...(BUILTIN_FIELD_TYPES[source.builtin ?? 'window'] ?? {}),
+    ...(source.field_types ?? {}),
+  };
+}
+
+export function hideBuiltinWindowSource(
+  source: SourceDefinitionV2,
+  requireSource: boolean
+): boolean {
+  return source.builtin === 'window' && !requireSource;
+}
+
+export function shouldSyncEditorDraft(canonicalChanged: boolean, draftDirty: boolean): boolean {
+  return canonicalChanged && !draftDirty;
+}
+
+export function shouldSyncCanonicalDraft(
+  saveInFlight: boolean,
+  canonicalChanged: boolean,
+  draftDirty: boolean
+): boolean {
+  return !saveInFlight && shouldSyncEditorDraft(canonicalChanged, draftDirty);
+}
+
+export function draftMatchesSubmission(current: unknown, submittedJson: string): boolean {
+  return JSON.stringify(current) === submittedJson;
+}
+
+export function formatSourceOwnership(
+  source: Pick<SourceDefinitionV2, 'builtin' | 'host' | 'bucket_hosts' | 'scope'>,
+  translate: Translate
+): string {
+  const hosts = Array.from(
+    new Set(
+      [source.host, ...Object.values(source.bucket_hosts ?? {})].filter(
+        (host): host is string => !!host && host !== 'unknown'
+      )
+    )
+  );
+  if (hosts.length) {
+    return translate('settings.categorization.sourceAvailableOn', { hosts: hosts.join(', ') });
+  }
+  if (source.builtin) {
+    return translate('settings.categorization.sourceAutomaticPerDevice');
+  }
+  if (source.scope === 'global') {
+    return translate('settings.categorization.sourceGlobal');
+  }
+  return translate('settings.categorization.sourceDeviceUnknown');
+}
 
 export function resolveBucketOwnership(
   bucketIds: string[],
@@ -47,6 +139,7 @@ export function resetRegexToAutomatic(expression: RuleExpressionV2): RuleExpress
   delete automatic.source;
   delete automatic.field;
   delete automatic.fields;
+  delete automatic.select_keys;
   delete automatic.host;
   delete automatic.negate;
   delete automatic.weight;
@@ -105,6 +198,7 @@ export function createDefaultRuleSource(existingIds: string[]): SourceDefinition
     scope: 'host',
     bucket_hosts: {},
     fields: ['app', 'title'],
+    interval_policy: 'exact',
   };
 }
 
@@ -129,6 +223,7 @@ export function createDetectedRuleSource(input: {
     scope: useGlobalScope ? 'global' : 'host',
     ...(useGlobalScope ? {} : { bucket_hosts: ownership.bucketHosts }),
     fields: [...input.fields],
+    interval_policy: 'exact',
     ...(input.createsActivity ? { creates_activity: true } : {}),
   };
 }

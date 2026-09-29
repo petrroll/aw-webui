@@ -1,6 +1,10 @@
 import { setActivePinia, createPinia } from 'pinia';
 
-import { queryNeedsResolvedActiveTime, useActivityStore } from '~/stores/activity';
+import {
+  buildActiveHistoryHostQueryParts,
+  queryNeedsResolvedActiveTime,
+  useActivityStore,
+} from '~/stores/activity';
 import { useBucketsStore } from '~/stores/buckets';
 import { useCategoryStore } from '~/stores/categories';
 import { useSettingsStore } from '~/stores/settings';
@@ -23,12 +27,15 @@ describe('activity store', () => {
     await activityStore.load_demo();
   });
 
-  test('loads demo data', () => {
+  test('loads demo data', async () => {
     // Load
     expect(categoryStore.classes).toHaveLength(0);
     categoryStore.restoreDefaultClasses();
     expect(categoryStore.classes_unsaved_changes).toBeTruthy();
-    categoryStore.save();
+    settingsStore.$patch({ _loaded: true });
+    const saveRules = jest.spyOn(settingsStore, 'saveCanonicalRulesV2').mockResolvedValue();
+    await categoryStore.save();
+    saveRules.mockRestore();
     expect(categoryStore.classes_unsaved_changes).toBeFalsy();
     expect(categoryStore.classes).not.toHaveLength(0);
 
@@ -73,6 +80,17 @@ describe('activity store', () => {
     ).rejects.toThrow('flexible activity model');
 
     expect(querySpy).not.toHaveBeenCalled();
+  });
+
+  test('active history unions only successfully materialized host suffixes', () => {
+    const parts = buildActiveHistoryHostQueryParts(['first', 'skipped', 'third'], (host, suffix) =>
+      host === 'skipped' ? null : `${host}:${suffix}`
+    );
+
+    expect(parts.hostQueries).toEqual(['first:active_host_0', 'third:active_host_2']);
+    expect(parts.union).toContain('active_active_host_0');
+    expect(parts.union).toContain('active_active_host_2');
+    expect(parts.union).not.toContain('active_active_host_1');
   });
 
   test('activity-only queries do not require active-time data when AFK filtering is off', () => {

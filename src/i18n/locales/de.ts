@@ -132,7 +132,7 @@ export default {
       title: 'Kategorisierung',
       restoreDefaults: 'Standard wiederherstellen',
       rulesHelp:
-        'Regeln zur Kategorisierung von Ereignissen. Ein Ereignis hat nur eine Kategorie. Bei mehreren Treffern wird die tiefste gewählt.',
+        'Regeln zur Kategorisierung von Ereignissen. Ein Ereignis hat nur eine Kategorie. Bei mehreren Treffern entscheiden zuerst Treffergewicht und Kategoriepriorität; die Tiefe löst verbleibende Gleichstände auf.',
       builderIntro: 'Sie können den',
       categoryBuilder: 'Kategorie-Builder',
       builderOutro: 'nutzen, um schnell Kategorien aus unkategorisierter Aktivität zu erstellen.',
@@ -143,9 +143,27 @@ export default {
       unsavedChanges: 'Ungespeicherte Änderungen!',
       importReplaceConfirm:
         'Der Import ersetzt die aktuellen Kategorisierungsregeln, Quellen und Aktivzeit-Einstellungen. Fortfahren?',
+      recoveryTitle: 'Wiederherstellung der Regeln erforderlich',
+      recoveryHelp:
+        'Die gespeicherten Regeln konnten nicht sicher geladen werden. Normale Änderungen ersetzen sie nicht. Exportieren Sie das Original vor einem bestätigten Import oder Zurücksetzen.',
+      recoveryExport: 'Original exportieren',
+      recoveryImport: 'Repariertes Dokument importieren',
+      recoveryReset: 'Zurücksetzen und ersetzen',
+      recoveryResetConfirm:
+        'Gespeicherte Regeln dauerhaft durch Standardwerte ersetzen? Exportieren Sie vorher das Original.',
+      conflictKeepDraft: 'Serverrevision neu laden und meinen Entwurf behalten',
+      conflictKeepDraftConfirm:
+        'Diesen Entwurf behalten und die neueste Serverrevision verwenden? Beim anschließenden Speichern können Änderungen des anderen Clients überschrieben werden.',
       discard: 'Verwerfen',
       addCategory: 'Kategorie hinzufügen',
       categories: 'Kategorien',
+      categorySetsTitle: 'Kategoriesätze',
+      categorySetsHelp:
+        'Aktivieren Sie einen oder mehrere Sätze und wählen Sie den zu bearbeitenden Satz.',
+      editCategorySet: 'Zu bearbeitender Satz',
+      downgradeCategorySetsHelp:
+        'Im einfachen Modus bleibt nur der erste ausgewählte Kategoriesatz aktiv.',
+      editorModeHintCategorySets: 'Zusätzliche Kategoriesätze: {sets}',
       builderTitle: 'Kategorie-Builder',
       builderSubtitle: 'Regeln aus unkategorisierter Aktivität erzeugen',
       openBuilder: 'Builder öffnen',
@@ -261,6 +279,8 @@ export default {
       ruleUnknownSource: 'Diese Regel verweist auf eine nicht verfügbare Quelle: {source}.',
       advancedRulesNotApplied:
         'Dieser Server unterstützt das flexible Aktivitätsmodell dieser Übersichten nicht. Aktualisiere den ActivityWatch-Server, um Berichte anzuzeigen.',
+      invalidRulesNotApplied:
+        'Die flexiblen Aktivitätseinstellungen sind ungültig. Aktivitätsberichte sind nicht verfügbar, bis die Einstellungen korrigiert wurden.',
       openRulesSettings: 'Regeleinstellungen öffnen.',
       noResolvedActivityHost:
         'Kein Gerät verfügt derzeit über genügend Watcher-Daten, um Aktivität aufzulösen.',
@@ -320,6 +340,11 @@ export default {
       sourceScopeGlobal: 'Auf jedem Gerät verwenden',
       sourceScopeGlobalHelp: 'Diese Quelle auf jedem Gerät verwenden.',
       sourceScopeHostHelp: 'Die Gerätezuordnung folgt den Watcher-Metadaten.',
+      sourceIntervalPolicy: 'Intervallrichtlinie',
+      sourceIntervalExact: 'Exakte aufgezeichnete Intervalle',
+      sourceIntervalHeartbeat: 'Heartbeat-Lückenfüllung (bis 5 Sekunden)',
+      sourceIntervalPolicyHelp:
+        'Heartbeat nur für pulsbasierte Watcher verwenden; Exakt erhält die Ereignisgrenzen.',
       removeSource: 'Quelle entfernen',
       addSource: 'Quelle hinzufügen',
       quickAddSources: 'Integrierte oder erkannte Quelle hinzufügen:',
@@ -383,8 +408,10 @@ export default {
       availableWatcherData: 'Verfügbare Watcher-Daten',
       allDevices: 'Alle Geräte',
       sourceAvailableOn: 'verfügbar auf {hosts}',
+      sourceAutomaticPerDevice: 'wird automatisch pro Gerät ausgewählt',
+      sourceGlobal: 'global (keinem Gerät fest zugeordnet)',
       sourceDeviceUnknown: 'Gerät nicht gemeldet',
-      sourceWatcherDetails: '{availability}. Regel-Computer: {host}.',
+      sourceWatcherDetails: 'Quelldaten: {ownership}. Computerfilter der Regel: {host}.',
       fields: 'Felder',
       sourceFieldsHelp: 'Regeln können diese als $source.{source}.<field> verwenden.',
       fieldsHelp:
@@ -393,6 +420,8 @@ export default {
       specificFields: 'Bestimmte Felder',
       specificFieldsHelp:
         'Wählen Sie mindestens ein Feld. Wechseln Sie zu Alle Textfelder, um die Auswahl zu löschen.',
+      valueMode: 'Wertetyp',
+      stringField: 'Text',
       scalarField: 'Zahl / Wahrheitswert',
       customFieldPlaceholder: 'Eigenen Feldschlüssel hinzufügen',
       addField: 'Hinzufügen',
@@ -532,7 +561,8 @@ export default {
     refresh: 'Aktualisieren',
     excludeAfk: 'AFK-Zeit ausschließen',
     audibleActive: 'Hörbaren Browser-Tab als aktiv zählen',
-    includeStopwatch: 'Manuell erfasste Ereignisse (Stoppuhr) einbeziehen',
+    includeStopwatch:
+      'Stoppuhr-Zusammenfassung anzeigen (Aktivitätszählung wird in Quellen konfiguriert)',
     newView: 'Neue Ansicht',
     loadDemo: 'Demo-Daten laden',
     periodDay: 'Tag',

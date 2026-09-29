@@ -69,11 +69,9 @@ export default Vue.extend({
     },
     filterCategoriesData() {
       this.$emit('input', this.categoriesWithRules);
-      console.log(this.categoriesWithRules);
     },
     pattern() {
       this.$emit('input', this.categoriesWithRules);
-      console.log(this.categoriesWithRules);
     },
   },
   async mounted() {

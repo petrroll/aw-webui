@@ -108,7 +108,10 @@ import { getClient } from '~/util/awclient';
 import { useBucketsStore } from '~/stores/buckets';
 import { useSettingsStore } from '~/stores/settings';
 import { serializeQueryJson } from '~/queries';
-import { resolveActivityEventsQuery } from '~/util/activityQuery';
+import {
+  projectMaterializedEventsForPresentation,
+  resolveActivityEventsQuery,
+} from '~/util/activityQuery';
 import { splitCategoryEventsByActivity } from '~/util/timelineCategories';
 
 export default {
@@ -152,7 +155,7 @@ export default {
           ? `afk_status = flood(query_bucket(${serializeQueryJson(afkBucket)}));`
           : 'afk_status = [];') +
         '\nRETURN = {"activity": events, "active": not_afk, "afk": afk_status};';
-      const { query } = resolveActivityEventsQuery({
+      const { query, materialized } = resolveActivityEventsQuery({
         host: this.host,
         filter_afk: false,
         v2: {
@@ -166,7 +169,11 @@ export default {
         [`${this.starttime.format()}/${this.endtime.format()}`],
         query
       );
-      return data[0] ?? { activity: [], active: [], afk: [] };
+      const result = data[0] ?? { activity: [], active: [], afk: [] };
+      return {
+        ...result,
+        activity: projectMaterializedEventsForPresentation(result.activity, materialized),
+      };
     },
 
     visualize: async function () {

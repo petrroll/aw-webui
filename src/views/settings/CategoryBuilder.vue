@@ -30,6 +30,8 @@ div
     h4 Options
     aw-query-options(v-model="queryOptions")
 
+  b-alert.mt-2(variant="danger" :show="!!editError") {{ editError }}
+
   hr
 
   h5 Common words in "{{category.join(" > ")}}" events
@@ -79,7 +81,7 @@ div
   div(v-if="create.categoryId !== null")
     CategoryEditModal(:categoryId="create.categoryId",
                       @ok="createRuleOk()"
-                      @hidden="createRuleCancel()")
+                      @hidden="createRuleHidden()")
 
   b-modal(id="appendRule" title="Append rule" @ok="handleOk" :ok-disabled="!valid")
     b-form(ref="form" @submit.stop.prevent="handleSubmit")
@@ -111,6 +113,7 @@ import { mapState } from 'pinia';
 
 import { useCategoryStore } from '~/stores/categories';
 import { useBucketsStore } from '~/stores/buckets';
+import { useSettingsStore } from '~/stores/settings';
 
 import { resolveActivityEventsQuery, remapNamespacedAppTitle } from '~/util/activityQuery';
 import { getClient } from '~/util/awclient';
@@ -118,6 +121,8 @@ import CategoryEditModal from '~/components/CategoryEditModal.vue';
 import { isRegexBroad, validateRegex } from '~/util/validate';
 import { findCommonPhrases } from '~/util/categorization';
 import { get_inclusive_local_date_range } from '~/util/time';
+import type { RuleExpressionV2 } from '~/util/rulesV2';
+import { findCategoryRuleV2 } from '~/util/rulesV2Editor';
 
 export default {
   name: 'CategoryBuilder',
@@ -132,6 +137,8 @@ export default {
       loading: true,
 
       categoryStore: useCategoryStore(),
+      settingsStore: useSettingsStore(),
+      editError: '',
 
       // Pagination for the words list. Showing the full list directly
       // produced a 2+ screen wall of buttons on most users' data; this
@@ -161,7 +168,11 @@ export default {
       },
       create: {
         word: '',
-        categoryId: null,
+        categoryId: null as number | null,
+        draftId: '',
+        originalName: [] as string[],
+        wasDirty: false,
+        saving: false,
       },
     };
   },
@@ -202,11 +213,11 @@ export default {
     },
   },
   async mounted() {
-    // Make sure we don't have stale unsaved changes in categoryStore
-    await useBucketsStore().ensureLoaded();
-    await this.categoryStore.load();
-    // Called by watch
-    //await this.fetchWords();
+    await Promise.all([useBucketsStore().ensureLoaded(), this.settingsStore.ensureLoaded()]);
+    if (!this.embedded) {
+      const activeSetId = this.settingsStore.rulesV2.activity_profiles_v2[0]?.category_set_ids[0];
+      this.categoryStore.load(undefined, activeSetId);
+    }
   },
   methods: {
     async fetchWords() {
@@ -227,7 +238,6 @@ export default {
           return;
         }
       }
-      await this.categoryStore.load();
       const awclient = getClient();
       const { query, materialized } = resolveActivityEventsQuery({
         host: this.queryOptions.hostname,
@@ -285,39 +295,114 @@ export default {
       this.showing_events = [word, events];
     },
     ignoreWord(word: string) {
-      console.log('Ignoring word: ' + word);
       this.ignored_words.push(word);
     },
+    phraseRule(pattern: string): RuleExpressionV2 {
+      const sourceId = this.settingsStore.rulesV2.activity_profiles_v2[0]?.app_title_source_id;
+      if (!sourceId) {
+        throw new Error('Configure an app/title presentation source before creating phrase rules');
+      }
+      return { type: 'regex', source: sourceId, field: 'title', regex: pattern };
+    },
     createRule(word: string) {
-      console.log('Opening modal for creating rule with word: ' + word);
-      const lastId = this.categoryStore.addClass({
-        name: [word],
-        rule: { type: 'regex', regex: _.escapeRegExp(word) },
-      });
-      this.create.word = word;
-      this.create.categoryId = lastId;
+      this.editError = '';
+      try {
+        const name = [word];
+        const rule = this.phraseRule(_.escapeRegExp(word));
+        const wasDirty = this.categoryStore.classes_unsaved_changes;
+        const lastId = this.categoryStore.addClass({
+          name,
+          rule: { type: 'none' },
+        });
+        const draftId = `category-builder-${lastId}`;
+        this.categoryStore.queueV2Edit({
+          draftId,
+          originalName: name,
+          name,
+          rule,
+          priority: 0,
+          requires: [],
+        });
+        this.create.word = word;
+        this.create.categoryId = lastId;
+        this.create.draftId = draftId;
+        this.create.originalName = name;
+        this.create.wasDirty = wasDirty;
+      } catch (error) {
+        this.editError = error instanceof Error ? error.message : String(error);
+      }
     },
     async createRuleOk() {
-      console.log('Creating rule with word: ' + this.create.word);
-      await this.categoryStore.save();
-      this.fetchWords();
+      this.create.saving = true;
+      this.editError = '';
+      try {
+        await this.categoryStore.save();
+        await this.fetchWords();
+      } catch (error) {
+        this.editError = error instanceof Error ? error.message : String(error);
+      } finally {
+        this.create.saving = false;
+        this.resetCreateState();
+      }
     },
-    async createRuleCancel() {
-      console.log('Cancelling create rule');
+    createRuleHidden() {
+      if (!this.create.saving && this.create.categoryId !== null) {
+        this.categoryStore.discardNewClassDraft(
+          this.create.categoryId,
+          this.create.draftId,
+          this.create.originalName,
+          this.create.wasDirty
+        );
+        this.resetCreateState();
+      } else {
+        this.create.categoryId = null;
+      }
+    },
+    resetCreateState() {
+      this.create.word = '';
       this.create.categoryId = null;
-      this.categoryStore.load(); // Restore categories to last saved
+      this.create.draftId = '';
+      this.create.originalName = [];
+      this.create.wasDirty = false;
     },
     appendRule(word) {
-      console.log('Opening modal to append rule with word: ' + word);
       this.append.word = _.escapeRegExp(word);
       this.$bvModal.show('appendRule');
     },
     async appendRuleOk() {
-      console.log('Appending rule with word: ' + this.append.word);
-      const cat = this.categoryStore.get_category(this.append.category);
-      this.categoryStore.appendClassRule(cat.id, this.append.word);
-      await this.categoryStore.save();
-      this.fetchWords();
+      this.editError = '';
+      try {
+        const rules = this.settingsStore.rulesV2;
+        const profile = rules.activity_profiles_v2[0];
+        const category = findCategoryRuleV2(
+          profile,
+          rules.category_sets_v2,
+          this.append.category,
+          this.categoryStore.editable_category_set_id ?? undefined
+        );
+        if (!category) throw new Error('The selected category rule is unavailable');
+        const pendingEdit = this.categoryStore.pendingV2Edit(category.id, category.name);
+        const currentRule = pendingEdit?.rule ?? category.rule;
+        const phraseRule = this.phraseRule(this.append.word);
+        const rule: RuleExpressionV2 =
+          currentRule.type === 'none'
+            ? phraseRule
+            : currentRule.type === 'any'
+            ? { ...currentRule, rules: [...currentRule.rules, phraseRule] }
+            : { type: 'any', rules: [currentRule, phraseRule] };
+        this.categoryStore.queueV2Edit({
+          categoryId: category.id,
+          originalName: [...category.name],
+          name: [...(pendingEdit?.name ?? category.name)],
+          rule,
+          priority: pendingEdit?.priority ?? category.priority ?? 0,
+          requires: [...(pendingEdit?.requires ?? category.requires ?? [])],
+        });
+        await this.categoryStore.save();
+        await this.fetchWords();
+      } catch (error) {
+        this.editError = error instanceof Error ? error.message : String(error);
+      }
     },
     handleOk(bvModalEvent) {
       // Prevent modal from closing (to be closed later in handleSubmit, if validation passes)
@@ -329,7 +414,6 @@ export default {
     handleSubmit(e) {
       // Exit when the form isn't valid
       if (!this.valid) {
-        //console.log(e);
         e.preventDefault();
         return;
       }

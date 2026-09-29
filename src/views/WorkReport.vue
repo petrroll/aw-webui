@@ -160,7 +160,6 @@ export default {
       const activeTime = this.settingsStore.rulesV2.activity_profiles_v2[0]?.active_time;
       return getWorkReportHostOptions(
         this.bucketsStore.buckets || [],
-        this.settingsStore.compiledRulesV2,
         this.settingsStore.compiledActivityQueryV2,
         activeTime?.type === 'legacy' ? activeTime.include_audible : undefined
       );
@@ -240,7 +239,6 @@ export default {
         const unsupportedHosts = getUnsupportedWorkReportHosts(
           this.selectedHosts,
           this.bucketsStore.buckets || [],
-          this.settingsStore.compiledRulesV2,
           this.settingsStore.compiledActivityQueryV2,
           this.settingsStore.rulesV2.activity_profiles_v2[0]?.active_time.type === 'legacy'
             ? this.settingsStore.rulesV2.activity_profiles_v2[0].active_time.include_audible
@@ -250,7 +248,6 @@ export default {
           const supportedHosts = getSupportedWorkReportHosts(
             this.selectedHosts,
             this.bucketsStore.buckets || [],
-            this.settingsStore.compiledRulesV2,
             this.settingsStore.compiledActivityQueryV2,
             this.settingsStore.rulesV2.activity_profiles_v2[0]?.active_time.type === 'legacy'
               ? this.settingsStore.rulesV2.activity_profiles_v2[0].active_time.include_audible
@@ -276,7 +273,6 @@ export default {
         const hostsToQuery = getSupportedWorkReportHosts(
           this.selectedHosts,
           this.bucketsStore.buckets || [],
-          this.settingsStore.compiledRulesV2,
           this.settingsStore.compiledActivityQueryV2,
           this.settingsStore.rulesV2.activity_profiles_v2[0]?.active_time.type === 'legacy'
             ? this.settingsStore.rulesV2.activity_profiles_v2[0].active_time.include_audible

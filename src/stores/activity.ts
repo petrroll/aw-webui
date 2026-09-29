@@ -6,6 +6,7 @@ import { IEvent } from '~/util/interfaces';
 
 import { window_events } from '~/util/fakedata';
 import queries, { queryStringToArray, resolveActivityProfileV2 } from '~/queries';
+import { androidActiveDurationQuery, androidAppQuery } from '~/legacy/queries';
 import { get_day_start_with_offset } from '~/util/time';
 import {
   TimePeriod,
@@ -32,7 +33,7 @@ import {
   buildFullActivityQueryV2,
   buildFullActivityMultiQueryV2,
   materializeHostActivityV2,
-  remapNamespacedAppTitle,
+  projectMaterializedEventsForPresentation,
   type HostActivityInput,
 } from '~/util/activityQuery';
 
@@ -52,6 +53,25 @@ function timeperiodsStrsMonthsOfPeriod(timeperiod: TimePeriod): string[] {
 
 function timeperiodStrsAroundTimeperiod(timeperiod: TimePeriod): string[] {
   return timeperiodsAroundTimeperiod(timeperiod).map(timeperiodToStr);
+}
+
+export function buildActiveHistoryHostQueryParts(
+  activeHosts: string[],
+  build: (host: string, suffix: string) => string | null
+): { hostQueries: string[]; union: string } {
+  const emitted = activeHosts
+    .map((activeHost, index) => {
+      const suffix = `active_host_${index}`;
+      const query = build(activeHost, suffix);
+      return query === null ? null : { query, suffix };
+    })
+    .filter((item): item is { query: string; suffix: string } => item !== null);
+  return {
+    hostQueries: emitted.map(item => item.query),
+    union: emitted
+      .map(item => `active_events = union_no_overlap(active_events, active_${item.suffix});`)
+      .join('\n'),
+  };
 }
 
 function colorCategories(events: IEvent[]): IEvent[] {
@@ -101,7 +121,6 @@ function hostActivityInputV2(
     filter_categories: opts.filter_categories ?? null,
     include_stopwatch: opts.include_stopwatch,
     include_audible: opts.include_audible,
-    browser_bucket_ids: bucketsStore.bucketsBrowser(host),
     explain_categories: opts.explain_categories,
     return_variable_suffix: opts.return_variable_suffix,
     category_specs: opts.category_specs,
@@ -356,8 +375,8 @@ export const useActivityStore = defineStore('activity', {
     async query_android({ timeperiod, filter_categories, host }: QueryOptions) {
       const periods = [timeperiodToStr(timeperiod)];
       const categoryStore = useCategoryStore();
-      const advanced = useSettingsStore().compiledRulesV2;
-      const q = queries.appQuery(
+      const advanced = useSettingsStore().compiledLegacyTargetOptions;
+      const q = androidAppQuery(
         this.buckets.android[0],
         categoryStore.classes_for_query,
         filter_categories,
@@ -414,13 +433,13 @@ export const useActivityStore = defineStore('activity', {
           verbose: true,
         });
         const activity = { ...(data[0].activity ?? {}) };
-        activity.app_events = remapNamespacedAppTitle(
+        activity.app_events = projectMaterializedEventsForPresentation(
           activity.app_events,
-          built.materialized.appTitleSourceId
+          built.materialized
         );
-        activity.title_events = remapNamespacedAppTitle(
+        activity.title_events = projectMaterializedEventsForPresentation(
           activity.title_events,
-          built.materialized.appTitleSourceId
+          built.materialized
         );
         this.query_activity_completed(activity);
         this.query_browser_completed(data[0].browser);
@@ -448,7 +467,6 @@ export const useActivityStore = defineStore('activity', {
             (!needsActiveTime ||
               hostHasResolvedActiveTimeV2(host, bucketsStore.buckets, compiledV2, {
                 includeAudible: queryOptions.include_audible,
-                browserBucketIds: bucketsStore.bucketsBrowser(host),
               })) &&
             (!host.startsWith('fakedata') || queryOptions.host.startsWith('fakedata'))
         );
@@ -483,13 +501,13 @@ export const useActivityStore = defineStore('activity', {
           verbose: true,
         });
         const activity = { ...(data[0].activity ?? {}) };
-        activity.app_events = remapNamespacedAppTitle(
+        activity.app_events = projectMaterializedEventsForPresentation(
           activity.app_events,
-          built.materialized.appTitleSourceId
+          built.materialized
         );
-        activity.title_events = remapNamespacedAppTitle(
+        activity.title_events = projectMaterializedEventsForPresentation(
           activity.title_events,
-          built.materialized.appTitleSourceId
+          built.materialized
         );
         this.query_activity_completed(activity);
         this.query_browser_completed(data[0].browser);
@@ -533,7 +551,6 @@ export const useActivityStore = defineStore('activity', {
               candidateHost !== 'unknown' &&
               hostHasResolvedActiveTimeV2(candidateHost, bucketsStore.buckets, compiledV2, {
                 includeAudible: include_audible,
-                browserBucketIds: bucketsStore.bucketsBrowser(candidateHost),
               }) &&
               hostHasResolvedActivityV2(candidateHost, bucketsStore.buckets, compiledV2) &&
               (!candidateHost.startsWith('fakedata') || host.startsWith('fakedata'))
@@ -542,32 +559,28 @@ export const useActivityStore = defineStore('activity', {
           activeHosts =
             hostHasResolvedActiveTimeV2(host, bucketsStore.buckets, compiledV2, {
               includeAudible: include_audible,
-              browserBucketIds: bucketsStore.bucketsBrowser(host),
             }) && hostHasResolvedActivityV2(host, bucketsStore.buckets, compiledV2)
               ? [host]
               : [];
         }
-        const hostQueries = activeHosts.map((activeHost, index) => {
-          const suffix = `active_host_${index}`;
-          const input = hostActivityInputV2(activeHost, {
-            filter_afk: false,
-            filter_categories: null,
-            include_audible,
-            category_specs: null,
-            return_variable_suffix: suffix,
-          });
-          const materialized = input ? materializeHostActivityV2(input) : null;
-          return (
-            resolveActivityProfileV2(materialized.params) +
-            `\nactive_${suffix} = filter_period_intersect(events_${suffix}, not_afk_${suffix});`
-          );
-        });
-        const union = activeHosts
-          .map(
-            (_activeHost, index) =>
-              `active_events = union_no_overlap(active_events, active_active_host_${index});`
-          )
-          .join('\n');
+        const { hostQueries, union } = buildActiveHistoryHostQueryParts(
+          activeHosts,
+          (activeHost, suffix) => {
+            const input = hostActivityInputV2(activeHost, {
+              filter_afk: false,
+              filter_categories: null,
+              include_audible,
+              category_specs: null,
+              return_variable_suffix: suffix,
+            });
+            const materialized = input ? materializeHostActivityV2(input) : null;
+            if (!materialized) return null;
+            return (
+              resolveActivityProfileV2(materialized.params) +
+              `\nactive_${suffix} = filter_period_intersect(events_${suffix}, not_afk_${suffix});`
+            );
+          }
+        );
         const query = queryStringToArray(
           `${hostQueries.join('\n')}\nactive_events = [];\n${union}\nRETURN = active_events;`
         );
@@ -653,13 +666,15 @@ export const useActivityStore = defineStore('activity', {
         const isAndroid = this.buckets.android[0] !== undefined;
         const categories = useCategoryStore().classes_for_query;
         const settingsStore = useSettingsStore();
-        const advanced = settingsStore.compiledRulesV2;
+        const advanced = settingsStore.compiledLegacyTargetOptions;
         const compiledV2 = settingsStore.compiledActivityQueryV2;
         const multideviceHosts =
           settingsStore.useMultidevice && !isAndroid
             ? this.eligibleMultideviceHosts({
                 timeperiod,
                 filter_afk,
+                include_audible,
+                include_stopwatch,
                 host,
               })
             : [];
@@ -682,7 +697,7 @@ export const useActivityStore = defineStore('activity', {
               .map(input => materializeHostActivityV2(input))
               .filter(m => m !== null)
               .map(m => m.params);
-            query = queries.categoryActivityMultiQueryV2(perHostParams);
+            query = queries.categoryActivityMultiQueryV2(perHostParams, filter_categories);
           } else {
             const input = hostActivityInputV2(host, {
               filter_afk,
@@ -745,7 +760,7 @@ export const useActivityStore = defineStore('activity', {
       });
       const data = await getClient().query(
         periods,
-        queries.activityQueryAndroid(this.buckets.android[0])
+        androidActiveDurationQuery(this.buckets.android[0])
       );
       const active_history = _.zipObject(periods, data);
       const active_history_events = _.mapValues(
@@ -781,7 +796,6 @@ export const useActivityStore = defineStore('activity', {
           compiledV2,
           {
             includeAudible: this.query_options?.include_audible,
-            browserBucketIds: bucketsStore.bucketsBrowser(currentHost),
           }
         );
         needsActiveTime = queryNeedsResolvedActiveTime(this.query_options?.filter_afk, false);
@@ -799,7 +813,6 @@ export const useActivityStore = defineStore('activity', {
             host: currentHost,
             buckets: bucketsStore.buckets,
             compiledV2,
-            browser_bucket_ids: this.buckets.browser,
           })
         : null;
       this.browser.available =

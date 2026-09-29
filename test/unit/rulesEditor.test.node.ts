@@ -3,12 +3,92 @@ import {
   convertRuleExpressionType,
   createDetectedRuleSource,
   createDefaultRuleSource,
+  draftMatchesSubmission,
+  effectiveSourceFieldTypes,
   formatRulesValidationError,
+  formatSourceOwnership,
+  hideBuiltinWindowSource,
+  persistedRuleValueMode,
   resolveBucketOwnership,
   resetRegexToAutomatic,
+  selectorForSourceChange,
+  shouldSyncCanonicalDraft,
+  shouldSyncEditorDraft,
 } from '~/util/rulesEditor';
 
 describe('rules editor state transitions', () => {
+  test('does not replace a dirty draft when an older save response arrives', () => {
+    expect(shouldSyncEditorDraft(true, true)).toBe(false);
+    expect(shouldSyncEditorDraft(true, false)).toBe(true);
+    expect(shouldSyncCanonicalDraft(true, true, false)).toBe(false);
+    expect(shouldSyncCanonicalDraft(false, true, false)).toBe(true);
+    const submitted = JSON.stringify({ type: 'regex', regex: 'Zoom' });
+    expect(draftMatchesSubmission({ type: 'regex', regex: 'Zoom' }, submitted)).toBe(true);
+    expect(draftMatchesSubmission({ type: 'regex', regex: 'Zoom|Meet' }, submitted)).toBe(false);
+  });
+
+  test('exposes builtin window when a source is mandatory', () => {
+    const source = {
+      id: 'builtin_window',
+      label: 'App & window',
+      builtin: 'window' as const,
+      bucket_ids: [],
+      fields: ['app', 'title'],
+    };
+    expect(hideBuiltinWindowSource(source, false)).toBe(true);
+    expect(hideBuiltinWindowSource(source, true)).toBe(false);
+  });
+
+  test.each([{ field: 'title' }, { fields: ['title'] }, { select_keys: ['title'] }])(
+    'preserves equivalent selector encoding during source changes',
+    selector => {
+      expect(
+        selectorForSourceChange(
+          { type: 'regex', source: 'first', regex: 'Match', ...selector },
+          ['app', 'title'],
+          ['app', 'title']
+        )
+      ).toEqual(['title']);
+    }
+  );
+
+  test('displays the persisted value mode rather than inferring from field metadata', () => {
+    expect(
+      persistedRuleValueMode({
+        type: 'regex',
+        source: 'browser',
+        fields: ['audible'],
+        regex: '^true$',
+      })
+    ).toBe('string');
+    expect(
+      persistedRuleValueMode({
+        type: 'regex',
+        source: 'browser',
+        fields: ['audible'],
+        regex: '^true$',
+        value_mode: 'scalar',
+      })
+    ).toBe('scalar');
+  });
+
+  test('knows scalar fields for old builtin browser definitions', () => {
+    const types = effectiveSourceFieldTypes({
+      id: 'browser',
+      label: 'Browser tabs',
+      builtin: 'browser',
+      bucket_ids: [],
+      fields: ['title', 'url', 'audible', 'incognito', 'tabCount'],
+    });
+    expect(types).toMatchObject({
+      title: 'string',
+      url: 'string',
+      audible: 'scalar',
+      incognito: 'scalar',
+      tabCount: 'scalar',
+    });
+  });
+
   test('partitions selected buckets by authoritative host metadata', () => {
     expect(
       resolveBucketOwnership(
@@ -59,6 +139,31 @@ describe('rules editor state transitions', () => {
     });
   });
 
+  test('presents both fixed-host source ownership forms', () => {
+    const translate = (key: string, values?: Record<string, unknown>) =>
+      `${key}:${values?.hosts ?? ''}`;
+
+    expect(formatSourceOwnership({ scope: 'host', host: 'PC-Houskape-20' }, translate)).toBe(
+      'settings.categorization.sourceAvailableOn:PC-Houskape-20'
+    );
+    expect(
+      formatSourceOwnership(
+        {
+          scope: 'host',
+          bucket_hosts: { 'browser-laptop': 'Laptop', 'browser-desktop': 'Desktop' },
+        },
+        translate
+      )
+    ).toBe('settings.categorization.sourceAvailableOn:Laptop, Desktop');
+  });
+
+  test('presents ownerless built-in sources as automatic per-device data', () => {
+    const translate = (key: string) => key;
+    expect(formatSourceOwnership({ builtin: 'browser' }, translate)).toBe(
+      'settings.categorization.sourceAutomaticPerDevice'
+    );
+  });
+
   test('converting a regex to an AND group preserves the existing condition', () => {
     expect(
       convertRuleExpressionType({ type: 'regex', regex: 'ActivityWatch', weight: 3 }, 'all')
@@ -76,6 +181,7 @@ describe('rules editor state transitions', () => {
         ignore_case: true,
         source: 'vdesktop',
         fields: ['vdesktop'],
+        select_keys: ['invisible-alias'],
         host: 'laptop',
         negate: true,
         weight: 7,
@@ -231,11 +337,7 @@ describe('rules editor state transitions', () => {
     };
 
     expect(
-      formatRulesValidationError(
-        'sources[0].fields must be non-empty',
-        [source],
-        translate
-      )
+      formatRulesValidationError('sources[0].fields must be non-empty', [source], translate)
     ).toBe('settings.categorization.validationSourceFieldsRequired:Meetings');
   });
 

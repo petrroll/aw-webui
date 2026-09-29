@@ -128,7 +128,6 @@ import RuleExpressionEditor from '~/components/RuleExpressionEditor.vue';
 import RulesValidationAlert from '~/components/RulesValidationAlert.vue';
 import { buildParentRequirementOptions } from '~/util/rulesEditor';
 import {
-  findCategoryRuleV2,
   canUseSimpleCategoryUI,
   collectRuleSourceIds,
   isLegacyCompatibleRuleV2,
@@ -138,6 +137,7 @@ import {
   type RuleExpressionV2,
   type SourceDefinitionV2,
 } from '~/util/rulesV2';
+import { findCategoryRuleV2 } from '~/util/rulesV2Editor';
 
 import 'vue-awesome/icons/trash';
 import 'vue-awesome/icons/info-circle';
@@ -164,6 +164,7 @@ export default {
       advancedPriority: 0,
       advancedRequires: [] as string[],
       advancedCategoryId: undefined as string | undefined,
+      advancedDraftId: undefined as string | undefined,
       advancedSaveError: '',
       advancedValidationAttempted: false,
       simpleUI: true,
@@ -220,8 +221,11 @@ export default {
       const editedPath = [...(this.editing.parent ?? []), this.editing.name].filter(
         part => typeof part === 'string' && part.length > 0
       );
+      const editableSet = rules.category_sets_v2.find(
+        set => set.id === this.categoryStore.editable_category_set_id
+      );
       return buildParentRequirementOptions({
-        categories: rules.category_sets_v2[0]?.categories ?? [],
+        categories: editableSet?.categories ?? [],
         currentPath: editedPath,
         currentCategoryId: this.advancedCategoryId,
         selectedIds: this.advancedRequires,
@@ -329,6 +333,7 @@ export default {
       this.advancedValidationAttempted = false;
       const preserveAdvanced = this.editorMode === 'advanced' || this.advancedRuleLocked;
       this.categoryStore.queueV2Edit({
+        draftId: this.advancedDraftId,
         categoryId: this.advancedCategoryId,
         originalName: this.originalName,
         name: new_class.name,
@@ -360,7 +365,8 @@ export default {
       const v2Category = findCategoryRuleV2(
         rules.activity_profiles_v2[0],
         rules.category_sets_v2,
-        canonicalName
+        canonicalName,
+        this.categoryStore.editable_category_set_id ?? undefined
       );
       const pendingEdit = this.categoryStore.pendingV2Edit(v2Category?.id, cat.name);
       this.originalName = [...(pendingEdit?.originalName ?? v2Category?.name ?? canonicalName)];
@@ -368,6 +374,7 @@ export default {
         pendingEdit?.rule ?? v2Category?.rule ?? legacyRuleToV2(cat.rule)
       );
       this.advancedCategoryId = pendingEdit?.categoryId ?? v2Category?.id;
+      this.advancedDraftId = pendingEdit?.draftId;
       this.advancedPriority = pendingEdit?.priority ?? v2Category?.priority ?? 0;
       this.advancedRequires = [...(pendingEdit?.requires ?? v2Category?.requires ?? [])];
       this.simpleUI = pendingEdit

@@ -131,7 +131,7 @@ export default {
       title: 'Categorization',
       restoreDefaults: 'Restore defaults',
       rulesHelp:
-        'Rules for categorizing events. An event can only have one category. If several categories match, the deepest one will be chosen.',
+        'Rules for categorizing events. An event can only have one category. When several categories match, match score and category priority decide first; depth breaks remaining ties.',
       builderIntro: 'You can use the',
       categoryBuilder: 'Category Builder',
       builderOutro: 'to quickly create categories from uncategorized activity.',
@@ -142,9 +142,26 @@ export default {
       unsavedChanges: 'You have unsaved changes!',
       importReplaceConfirm:
         'Importing will replace the current categorization rules, sources, and active-time settings. Continue?',
+      recoveryTitle: 'Rules recovery required',
+      recoveryHelp:
+        'The stored rules could not be safely loaded. Ordinary edits cannot replace them. Export the original document before explicitly importing a repair or resetting to defaults.',
+      recoveryExport: 'Export original document',
+      recoveryImport: 'Import repaired document',
+      recoveryReset: 'Reset and replace',
+      recoveryResetConfirm:
+        'Permanently replace the stored rules with defaults? Export the original document first if you may need it.',
+      conflictKeepDraft: 'Reload server revision and keep my draft',
+      conflictKeepDraftConfirm:
+        'Keep this draft and use the latest server revision? Saving afterward may overwrite changes made by the other client.',
       discard: 'Discard',
       addCategory: 'Add category',
       categories: 'Categories',
+      categorySetsTitle: 'Category sets',
+      categorySetsHelp:
+        'Enable one or more sets for combined categorization. Choose which enabled or inactive set to edit below.',
+      editCategorySet: 'Set to edit',
+      downgradeCategorySetsHelp: 'Simple mode keeps only the first selected category set active.',
+      editorModeHintCategorySets: 'Additional category sets: {sets}',
       builderTitle: 'Category builder',
       builderSubtitle: 'Generate rules from uncategorized activity',
       openBuilder: 'Open builder',
@@ -255,6 +272,8 @@ export default {
       ruleUnknownSource: 'This rule references an unavailable source: {source}.',
       advancedRulesNotApplied:
         "This server doesn't support the flexible activity model these dashboards need. Update your ActivityWatch server to see reports.",
+      invalidRulesNotApplied:
+        'Flexible activity settings are invalid. Activity reports are unavailable until the settings are fixed.',
       openRulesSettings: 'Open rules settings.',
       noResolvedActivityHost: 'No device currently has enough watcher data to resolve activity.',
       activitySetupHelp:
@@ -313,6 +332,11 @@ export default {
       sourceScopeGlobal: 'Use on every device',
       sourceScopeGlobalHelp: 'Use this source on every device.',
       sourceScopeHostHelp: 'Device ownership follows watcher metadata.',
+      sourceIntervalPolicy: 'Interval policy',
+      sourceIntervalExact: 'Exact recorded intervals',
+      sourceIntervalHeartbeat: 'Heartbeat gap filling (up to 5 seconds)',
+      sourceIntervalPolicyHelp:
+        'Use heartbeat only for pulse-based watchers. Exact preserves recorded event bounds.',
       removeSource: 'Remove source',
       addSource: 'Add source',
       quickAddSources: 'Add a built-in or detected source:',
@@ -375,8 +399,10 @@ export default {
       availableWatcherData: 'Available watcher data',
       allDevices: 'All devices',
       sourceAvailableOn: 'available on {hosts}',
+      sourceAutomaticPerDevice: 'selected automatically for each device',
+      sourceGlobal: 'global (not tied to a device)',
       sourceDeviceUnknown: 'device not reported',
-      sourceWatcherDetails: '{availability}. Rule host: {host}.',
+      sourceWatcherDetails: 'Source data: {ownership}. Rule host filter: {host}.',
       fields: 'Fields',
       sourceFieldsHelp: 'Rules can use these as $source.{source}.<field>.',
       fieldsHelp:
@@ -385,6 +411,8 @@ export default {
       specificFields: 'Specific fields',
       specificFieldsHelp:
         'Choose at least one field. To clear the selection, switch to All text fields.',
+      valueMode: 'Value type',
+      stringField: 'text',
       scalarField: 'number / boolean',
       customFieldPlaceholder: 'Add a custom field key',
       addField: 'Add',
@@ -523,7 +551,7 @@ export default {
     refresh: 'Refresh',
     excludeAfk: 'Exclude AFK time',
     audibleActive: 'Count audible browser tab as active',
-    includeStopwatch: 'Include manually logged events (stopwatch)',
+    includeStopwatch: 'Show stopwatch summary (activity counting is configured in Sources)',
     newView: 'New view',
     loadDemo: 'Load demo data',
     periodDay: 'day',

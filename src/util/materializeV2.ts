@@ -1,15 +1,16 @@
 import type { IBucket } from '~/util/interfaces';
 import type { CanonicalQueryParamsV2 } from '~/queries';
+import { browserAppNameRegex, browserAppNames, browserFamiliesWithBuckets } from '~/util/browser';
 import {
-  BUILTIN_WINDOW_SOURCE_ID,
+  allocateGeneratedSourceId,
   type CompiledActivityQueryV2,
   type CompiledCoverageSourceV2,
   type CompiledContextSourceV2,
   type CompiledActiveSourceV2,
   type RuleExpressionV2,
+  type SourceDefinitionV2,
+  sourceIntervalPolicy,
 } from '~/util/rulesV2';
-
-const AFK_SOURCE_ID = 'afk';
 
 function bucketHost(bucket: IBucket | undefined): string | undefined {
   return bucket?.hostname || bucket?.data?.hostname;
@@ -17,20 +18,6 @@ function bucketHost(bucket: IBucket | undefined): string | undefined {
 
 function bucketOwnedByHost(bucket: IBucket, host: string): boolean {
   return bucketHost(bucket) === host;
-}
-
-// A configured builtin window source is one the compiled profile actually kept,
-// whether as an activity-coverage source or a context source. The legacy
-// always-active pattern branch may only be materialized when such a source
-// exists; if the profile removed the window source the branch must never be
-// rediscovered from a stray currentwindow bucket. compileActivityQueryV2 already
-// rejects a nonempty always_active_pattern without a configured window source, so
-// this predicate keeps materialization symmetrical with that validation.
-function windowSourceConfigured(compiled: CompiledActivityQueryV2): boolean {
-  return (
-    compiled.activity_coverage_sources.some(source => source.builtin === 'window') ||
-    compiled.context_sources.some(source => source.builtin === 'window')
-  );
 }
 
 // Bucket discovery is host-scoped and inert on its own: it only produces bucket
@@ -44,13 +31,15 @@ export function findWindowBucketIds(buckets: IBucket[], host: string): string[] 
         !bucket.id.startsWith('aw-watcher-android') &&
         bucketOwnedByHost(bucket, host)
     )
-    .map(bucket => bucket.id);
+    .map(bucket => bucket.id)
+    .sort();
 }
 
 export function findAfkBucketIds(buckets: IBucket[], host: string): string[] {
   return buckets
     .filter(bucket => bucket.type === 'afkstatus' && bucketOwnedByHost(bucket, host))
-    .map(bucket => bucket.id);
+    .map(bucket => bucket.id)
+    .sort();
 }
 
 export function findBrowserBucketIds(buckets: IBucket[], host: string): string[] {
@@ -58,7 +47,9 @@ export function findBrowserBucketIds(buckets: IBucket[], host: string): string[]
   const owned = browserBuckets.filter(bucket => bucketOwnedByHost(bucket, host));
   return (
     owned.length > 0 ? owned : browserBuckets.filter(bucket => bucketHost(bucket) === 'unknown')
-  ).map(bucket => bucket.id);
+  )
+    .map(bucket => bucket.id)
+    .sort();
 }
 
 export function findStopwatchBucketIds(buckets: IBucket[], host: string): string[] {
@@ -66,7 +57,9 @@ export function findStopwatchBucketIds(buckets: IBucket[], host: string): string
   const owned = stopwatchBuckets.filter(bucket => bucketOwnedByHost(bucket, host));
   return (
     owned.length > 0 ? owned : stopwatchBuckets.filter(bucket => bucketHost(bucket) === 'unknown')
-  ).map(bucket => bucket.id);
+  )
+    .map(bucket => bucket.id)
+    .sort();
 }
 
 function materializeCoverageSource(
@@ -107,6 +100,46 @@ function materializeContextSource(
   };
 }
 
+export function materializeConfiguredContextSources(
+  sources: SourceDefinitionV2[],
+  buckets: IBucket[],
+  host: string
+): CompiledContextSourceV2[] {
+  return sources
+    .map(source =>
+      materializeContextSource(
+        {
+          source_id: source.id,
+          ...(source.builtin ? { builtin: source.builtin } : {}),
+          bucket_ids: [...source.bucket_ids],
+          scope: source.bucket_ids.length === 0 && source.builtin ? 'host' : source.scope,
+          ...(source.bucket_hosts ? { bucket_hosts: { ...source.bucket_hosts } } : {}),
+          fields: [...source.fields],
+          interval_policy: sourceIntervalPolicy(source),
+          conflict: 'base_wins',
+          host: source.host,
+        },
+        buckets,
+        host
+      )
+    )
+    .filter(source => source.bucket_ids.length > 0);
+}
+
+function activeSourceFromMaterializedCoverage(
+  source: CompiledCoverageSourceV2
+): CompiledActiveSourceV2 {
+  return {
+    source_id: source.source_id,
+    ...(source.builtin ? { builtin: source.builtin } : {}),
+    bucket_ids: [...source.bucket_ids],
+    interval_policy: sourceIntervalPolicy(source),
+    scope: source.scope,
+    ...(source.bucket_hosts ? { bucket_hosts: { ...source.bucket_hosts } } : {}),
+    host: source.host,
+  };
+}
+
 function materializeActiveSource(
   source: CompiledActiveSourceV2,
   buckets: IBucket[],
@@ -143,7 +176,6 @@ export interface MaterializeActivityQueryV2Input {
   explainCategories?: boolean;
   includeStopwatch?: boolean;
   includeAudible?: boolean;
-  browserBucketIds?: string[];
   returnVariableSuffix?: string;
 }
 
@@ -151,13 +183,44 @@ export interface MaterializeActivityQueryV2Input {
 // default window source's actual bucket IDs (only when that source exists),
 // drops sources that resolve to no available bucket (so an unconfigured or
 // missing window bucket is inert), synthesizes explicit AFK/window active-time
-// sources from retained legacy settings, and adds a requested stopwatch as an
-// ordinary namespaced coverage source. It never injects root app/title.
+// sources from retained legacy settings. Stopwatch coverage is controlled by
+// the configured source model; report options only control its presentation.
+// It never injects root app/title.
+export function materializeConfiguredBrowserSource(
+  compiled: CompiledActivityQueryV2,
+  buckets: IBucket[],
+  host: string
+): CompiledCoverageSourceV2 | undefined {
+  if (!compiled.browser_source) return undefined;
+  const source = materializeCoverageSource(compiled.browser_source, buckets, host);
+  return source.bucket_ids.length > 0 ? source : undefined;
+}
+
+function sourceForBuckets(
+  source: CompiledCoverageSourceV2,
+  sourceId: string,
+  bucketIds: string[]
+): CompiledActiveSourceV2 {
+  const bucketHosts = source.bucket_hosts
+    ? Object.fromEntries(
+        Object.entries(source.bucket_hosts).filter(([bucketId]) => bucketIds.includes(bucketId))
+      )
+    : undefined;
+  return {
+    source_id: sourceId,
+    builtin: 'browser',
+    bucket_ids: bucketIds,
+    interval_policy: source.interval_policy,
+    scope: source.scope,
+    ...(bucketHosts && Object.keys(bucketHosts).length > 0 ? { bucket_hosts: bucketHosts } : {}),
+    ...(source.host ? { host: source.host } : {}),
+  };
+}
+
 export function materializeActivityQueryV2(
   input: MaterializeActivityQueryV2Input
 ): CanonicalQueryParamsV2 {
   const { compiled, buckets, host } = input;
-  const windowBucketIds = findWindowBucketIds(buckets, host);
   const afkBucketIds = findAfkBucketIds(buckets, host);
 
   const activityCoverage = compiled.activity_coverage_sources
@@ -174,68 +237,130 @@ export function materializeActivityQueryV2(
   let activeTimeSources: CompiledActiveSourceV2[] = compiled.active_time_sources.map(source =>
     materializeActiveSource(source, buckets, host)
   );
+  const hasKeepsActiveCoverage = activityCoverage.some(source => source.keeps_active);
+  const unavailableActiveSource = activeTimeSources.find(
+    source => source.builtin && source.bucket_ids.length === 0
+  );
+  if (
+    activeTimeRule &&
+    input.filterAfk !== false &&
+    !hasKeepsActiveCoverage &&
+    unavailableActiveSource
+  ) {
+    throw new Error(
+      `Active-time rule references unavailable source '${unavailableActiveSource.source_id}'`
+    );
+  }
 
   if (!activeTimeRule && compiled.legacy_active_time) {
     const branches: RuleExpressionV2[] = [];
     const synthSources: CompiledActiveSourceV2[] = [];
-    if (compiled.legacy_active_time.use_afk && afkBucketIds.length > 0) {
+    const occupiedSourceIds = new Set(
+      compiled.declared_source_ids ?? [
+        ...compiled.activity_coverage_sources.map(source => source.source_id),
+        ...compiled.context_sources.map(source => source.source_id),
+        ...compiled.active_time_sources.map(source => source.source_id),
+        ...(compiled.browser_source ? [compiled.browser_source.source_id] : []),
+      ]
+    );
+    const afkSourceId = compiled.legacy_active_time.use_afk
+      ? allocateGeneratedSourceId(occupiedSourceIds, 'afk')
+      : undefined;
+    if (afkSourceId && afkBucketIds.length > 0) {
       synthSources.push({
-        source_id: AFK_SOURCE_ID,
+        source_id: afkSourceId,
         bucket_ids: afkBucketIds,
+        interval_policy: 'heartbeat',
         scope: 'host',
         host,
       });
-      branches.push({ type: 'regex', source: AFK_SOURCE_ID, field: 'status', regex: 'not-afk' });
+      branches.push({ type: 'regex', source: afkSourceId, field: 'status', regex: '^not-afk$' });
     }
-    if (
-      compiled.legacy_active_time.always_active_pattern &&
-      windowSourceConfigured(compiled) &&
-      windowBucketIds.length > 0
-    ) {
-      synthSources.push({
-        source_id: BUILTIN_WINDOW_SOURCE_ID,
-        bucket_ids: windowBucketIds,
-        scope: 'host',
-        host,
-      });
+    const windowSource = [...activityCoverage, ...contextSources].find(
+      source => source.builtin === 'window'
+    );
+    if (compiled.legacy_active_time.always_active_pattern && windowSource) {
       const pattern = compiled.legacy_active_time.always_active_pattern;
-      branches.push({
-        type: 'any',
-        rules: [
-          { type: 'regex', source: BUILTIN_WINDOW_SOURCE_ID, field: 'app', regex: pattern },
-          { type: 'regex', source: BUILTIN_WINDOW_SOURCE_ID, field: 'title', regex: pattern },
-        ],
-      });
+      const windowRules: RuleExpressionV2[] = windowSource.fields
+        .filter(field => field === 'app' || field === 'title')
+        .map(field => ({
+          type: 'regex',
+          source: windowSource.source_id,
+          field,
+          regex: pattern,
+        }));
+      if (windowRules.length > 0) {
+        // Reuse the materialized canonical source exactly. In particular, a pinned
+        // bucket or host scope must not be replaced by auto-discovered window
+        // buckets merely because this is a legacy compatibility rule.
+        synthSources.push(activeSourceFromMaterializedCoverage(windowSource));
+        branches.push(
+          windowRules.length === 1 ? windowRules[0] : { type: 'any', rules: windowRules }
+        );
+      }
     }
-    // Audible-browser active-time: when legacy simple mode included audible
-    // browser time, materialize it as explicit generated browser active-time
-    // sources (bucket IDs supplied by the caller) with a rule matching the
-    // `audible` field. This is best-effort: if the server cannot evaluate the
-    // boolean field it is simply inert (never a false active period).
+    // Legacy audible time counted only while the corresponding browser was the
+    // focused app. Express that contract explicitly as (audible AND focused)
+    // using the configured browser-focus source; without such a source this
+    // compatibility branch remains unavailable rather than broadening behavior.
+    const browserFocusSource = [...activityCoverage, ...contextSources].find(
+      source =>
+        (compiled.browser_focus_source_id
+          ? source.source_id === compiled.browser_focus_source_id
+          : source.builtin === 'window') && source.fields.includes('app')
+    );
+    const browserSource = materializeConfiguredBrowserSource(compiled, buckets, host);
     if (
       compiled.legacy_active_time.include_audible &&
-      input.includeAudible &&
-      (input.browserBucketIds?.length ?? 0) > 0
+      input.includeAudible !== false &&
+      browserFocusSource &&
+      browserSource?.fields.includes('audible')
     ) {
       const audibleBranches: RuleExpressionV2[] = [];
-      (input.browserBucketIds ?? []).forEach((bucketId, index) => {
-        const sourceId = `browser_audible_${index}`;
-        const usesUnknownFallback =
-          bucketHost(buckets.find(bucket => bucket.id === bucketId)) === 'unknown';
-        synthSources.push({
-          source_id: sourceId,
-          bucket_ids: [bucketId],
-          scope: usesUnknownFallback ? 'global' : 'host',
-          ...(usesUnknownFallback ? {} : { host }),
-        });
-        audibleBranches.push({
-          type: 'regex',
-          source: sourceId,
-          field: 'audible',
-          regex: 'true',
-        });
-      });
+      browserFamiliesWithBuckets(browserSource.bucket_ids).forEach(
+        ([browserName, bucketIds], index) => {
+          const sourceId = allocateGeneratedSourceId(occupiedSourceIds, `browser_audible_${index}`);
+          synthSources.push(sourceForBuckets(browserSource, sourceId, bucketIds));
+          const focusRules: RuleExpressionV2[] = [];
+          if (browserAppNames[browserName].length > 0) {
+            const exactNames = browserAppNames[browserName]
+              .map(name => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+              .join('|');
+            focusRules.push({
+              type: 'regex',
+              source: browserFocusSource.source_id,
+              field: 'app',
+              regex: `^(?:${exactNames})$`,
+            });
+          }
+          const appPattern = browserAppNameRegex[browserName];
+          if (appPattern) {
+            focusRules.push({
+              type: 'regex',
+              source: browserFocusSource.source_id,
+              field: 'app',
+              regex: appPattern,
+            });
+          }
+          audibleBranches.push({
+            type: 'all',
+            rules: [
+              {
+                type: 'regex',
+                source: sourceId,
+                field: 'audible',
+                regex: '^true$',
+                value_mode: 'scalar',
+              },
+              focusRules.length === 1 ? focusRules[0] : { type: 'any', rules: focusRules },
+            ],
+          });
+        }
+      );
       if (audibleBranches.length > 0) {
+        if (!synthSources.some(source => source.source_id === browserFocusSource.source_id)) {
+          synthSources.push(activeSourceFromMaterializedCoverage(browserFocusSource));
+        }
         branches.push(
           audibleBranches.length === 1
             ? audibleBranches[0]
@@ -245,18 +370,9 @@ export function materializeActivityQueryV2(
     }
     if (branches.length > 0) {
       activeTimeRule = branches.length === 1 ? branches[0] : { type: 'any', rules: branches };
-      const seen = new Set<string>();
-      activeTimeSources = synthSources.filter(source => {
-        if (seen.has(source.source_id)) return false;
-        seen.add(source.source_id);
-        return true;
-      });
+      activeTimeSources = synthSources;
     }
   }
-  if (activeTimeRule && activeTimeSources.length === 0) {
-    activeTimeRule = undefined;
-  }
-
   return {
     hostname: host,
     category_specs: compiled.category_specs,

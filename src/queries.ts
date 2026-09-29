@@ -1,5 +1,8 @@
 import _ from 'lodash';
-import type { RuleExpressionV2 } from '~/util/rulesV2';
+import { allocateGeneratedSourceId, type RuleExpressionV2 } from '~/util/rulesV2';
+import { resolveLegacyActivityProfile } from '~/legacy/profile';
+export { resolveLegacyActivityProfile } from '~/legacy/profile';
+import { browserAppNameRegex, browserAppNames, browserFamiliesWithBuckets } from '~/util/browser';
 
 // TODO: Sanitize string input of buckets
 
@@ -67,14 +70,19 @@ export function safeHostname(hostname: string): string {
 interface Rule {
   type: string;
   regex?: string;
+  ignore_case?: boolean;
+  select_keys?: string[];
 }
 
 type Category = [string[], Rule];
+
+export type SourceIntervalPolicy = 'exact' | 'heartbeat';
 
 export interface ContextSource {
   source_id: string;
   builtin?: 'window' | 'browser' | 'stopwatch';
   bucket_ids: string[];
+  interval_policy?: SourceIntervalPolicy;
   scope?: 'host' | 'global';
   bucket_hosts?: Record<string, string>;
   fields: string[];
@@ -86,6 +94,7 @@ export interface ActiveTimeSource {
   source_id: string;
   builtin?: 'window' | 'browser' | 'stopwatch' | 'afk';
   bucket_ids: string[];
+  interval_policy?: SourceIntervalPolicy;
   scope?: 'host' | 'global';
   bucket_hosts?: Record<string, string>;
   host?: string;
@@ -104,6 +113,7 @@ export interface ActivityCoverageSource {
   source_id: string;
   builtin?: 'window' | 'browser' | 'stopwatch';
   bucket_ids: string[];
+  interval_policy?: SourceIntervalPolicy;
   scope?: 'host' | 'global';
   bucket_hosts?: Record<string, string>;
   fields: string[];
@@ -111,7 +121,14 @@ export interface ActivityCoverageSource {
   host?: string;
 }
 
-export type CategorySpecV2 = Record<string, unknown>;
+export interface CategorySpecV2 {
+  id: string;
+  name: string[];
+  rule: RuleExpressionV2;
+  priority?: number;
+  set_priority?: number;
+  requires?: string[];
+}
 
 export const RULE_ENGINE_CAPABILITIES = {
   categorize: 'query.categorize_v2.v1',
@@ -120,6 +137,9 @@ export const RULE_ENGINE_CAPABILITIES = {
   activePeriods: 'query.active_periods_v2.v1',
   mapEventFields: 'query.map_event_fields.v1',
   expectedBucketHostname: 'query.query_bucket_optional.expected_hostname.v1',
+  optionalRawBucket: 'query.query_bucket_optional_raw.v1',
+  queryPeriod: 'query.query_period.v1',
+  floodV2: 'query.flood_v2.v1',
 } as const;
 
 interface BaseQueryParams {
@@ -197,11 +217,11 @@ function get_params(
   return new_params;
 }
 
-function isDesktopParams(object: any): object is DesktopQueryParams {
+export function isDesktopParams(object: any): object is DesktopQueryParams {
   return !isAndroidParams(object);
 }
 
-function isAndroidParams(object: any): object is AndroidQueryParams {
+export function isAndroidParams(object: any): object is AndroidQueryParams {
   return 'bid_android' in object;
 }
 
@@ -213,7 +233,7 @@ function isMultiParams(object: any): object is MultiQueryParams {
 // Fall back to find_bucket only when the ID is partial (ends with '_', meaning hostname is unknown).
 // This avoids find_bucket matching wrong buckets when similar names exist (e.g. host vs host.local).
 // See: https://github.com/ActivityWatch/aw-webui/issues/590
-function queryBucket(bid: string): string {
+export function queryBucket(bid: string): string {
   const serializedBid = serializeQueryString(bid, 'Bucket ID');
   if (bid.endsWith('_')) {
     return `query_bucket(find_bucket(${serializedBid}))`;
@@ -221,24 +241,74 @@ function queryBucket(bid: string): string {
   return `query_bucket(${serializedBid})`;
 }
 
-function queryOptionalBucket(bid: string, expectedHostname?: string): string {
+export function queryOptionalBucket(bid: string, expectedHostname?: string): string {
   const args = [serializeQueryString(bid, 'Bucket ID')];
   if (expectedHostname) args.push(serializeQueryJson(expectedHostname));
   return `query_bucket_optional(${args.join(', ')})`;
 }
 
-function expectedSourceHostname(
+function queryOptionalRawBucket(
+  bid: string,
+  expectedHostname?: string,
+  paddingSeconds = 0,
+  bucketExpression?: string
+): string {
+  const args = [bucketExpression ?? serializeQueryString(bid, 'Bucket ID')];
+  if (expectedHostname || paddingSeconds > 0) {
+    args.push(expectedHostname ? serializeQueryJson(expectedHostname) : 'null');
+  }
+  if (paddingSeconds > 0) args.push(String(paddingSeconds));
+  return `query_bucket_optional_raw(${args.join(', ')})`;
+}
+
+function loadSourceBucket(
+  params: { capabilities?: string[] },
+  source: { interval_policy?: SourceIntervalPolicy; scope?: 'host' | 'global'; host?: string },
+  bucketId: string,
+  expectedHostname?: string,
+  bucketExpression?: string
+): string {
+  const supportsRaw =
+    params.capabilities?.includes(RULE_ENGINE_CAPABILITIES.optionalRawBucket) ?? false;
+  if (!supportsRaw) {
+    // Explicit old-server compatibility boundary. Current-server v2 callers are
+    // capability-gated before compilation and always take the raw branch.
+    return `flood(${queryOptionalBucket(bucketId, expectedHostname)})`;
+  }
+  const heartbeat = (source.interval_policy ?? 'exact') === 'heartbeat';
+  if (heartbeat) {
+    requireCapability(params, RULE_ENGINE_CAPABILITIES.floodV2, 'Heartbeat interval policy');
+  }
+  return queryOptionalRawBucket(bucketId, expectedHostname, heartbeat ? 5 : 0, bucketExpression);
+}
+
+function normalizeLoadedSource(
+  params: { capabilities?: string[] },
+  source: { interval_policy?: SourceIntervalPolicy },
+  variable: string
+): string {
+  // Flood once after every competing bucket in this logical source has been
+  // concatenated. Flooding buckets independently can invent overlapping gap
+  // extensions and make the result depend on bucket order.
+  return params.capabilities?.includes(RULE_ENGINE_CAPABILITIES.optionalRawBucket) &&
+    (source.interval_policy ?? 'exact') === 'heartbeat'
+    ? `${variable} = flood_v2(${variable});`
+    : '';
+}
+
+export function expectedSourceHostname(
   params: BaseQueryParams,
   source: { scope?: 'host' | 'global'; host?: string }
 ): string | undefined {
   return source.scope !== 'global' &&
     params.hostname &&
-    params.capabilities?.includes(RULE_ENGINE_CAPABILITIES.expectedBucketHostname)
+    (params.capabilities?.includes(RULE_ENGINE_CAPABILITIES.optionalRawBucket) ||
+      params.capabilities?.includes(RULE_ENGINE_CAPABILITIES.expectedBucketHostname))
     ? params.hostname
     : undefined;
 }
 
-function serializeQueryString(value: string, label: string): string {
+export function serializeQueryString(value: string, label: string): string {
   const trailingBackslashes = value.match(/\\+$/)?.[0].length ?? 0;
   if (trailingBackslashes % 2 === 1) {
     throw new Error(`${label} cannot end with an odd number of backslashes in Query2`);
@@ -246,7 +316,7 @@ function serializeQueryString(value: string, label: string): string {
   return serializeQueryJson(value);
 }
 
-function requireCapability(
+export function requireCapability(
   params: { capabilities?: string[] },
   capability: string,
   feature: string
@@ -323,7 +393,16 @@ function materializeBuiltinBucketIds(
   return source.bucket_ids;
 }
 
-function contextEvents(params: BaseQueryParams): string {
+interface CanonicalPipelineInternals {
+  bucketExpressions?: Record<string, string[]>;
+  activeAliases?: Record<string, string>;
+  auxiliarySources?: ActiveTimeSource[];
+}
+
+export function contextEvents(
+  params: BaseQueryParams,
+  internals: CanonicalPipelineInternals = {}
+): string {
   const sources = params.context_sources ?? [];
   if (sources.length === 0) {
     return '';
@@ -365,54 +444,19 @@ function contextEvents(params: BaseQueryParams): string {
       return [
         `${variable} = [];`,
         ...resolveSourceBucketIds(source, params.hostname).map(
-          bucketId =>
-            `${variable} = concat(${variable}, flood(${queryOptionalBucket(
+          (bucketId, bucketIndex) =>
+            `${variable} = concat(${variable}, ${loadSourceBucket(
+              params,
+              source,
               bucketId,
-              expectedSourceHostname(params, source)
-            )}));`
+              expectedSourceHostname(params, source),
+              internals.bucketExpressions?.[source.source_id]?.[bucketIndex]
+            )});`
         ),
-        `${variable} = filter_period_intersect(${variable}, events);`,
+        normalizeLoadedSource(params, source, variable),
         `${fieldsVariable} = ${serializeQueryJson(source.fields)};`,
         `${optionsVariable} = ${options};`,
         `events = merge_subwatcher_fields(events, ${variable}, ${fieldsVariable}, ${optionsVariable});`,
-      ].join('\n');
-    })
-    .join('\n');
-}
-
-function replacementActivityEvents(params: DesktopQueryParams): string {
-  const sources = params.activity_sources ?? [];
-  if (sources.length === 0) return '';
-  requireCapability(
-    params,
-    RULE_ENGINE_CAPABILITIES.mapEventFields,
-    'Replacement activity sources'
-  );
-
-  return sources
-    .map((source, index) => {
-      if (!/^[A-Za-z0-9_-]+$/.test(source.source_id)) {
-        throw new Error("Activity source_id may only contain letters, numbers, '_' and '-'");
-      }
-      if (source.bucket_ids.length === 0) {
-        throw new Error('Activity source must contain at least one bucket_id');
-      }
-      const variable = `activity_source_${index}`;
-      return [
-        `${variable} = [];`,
-        ...resolveSourceBucketIds(source, params.hostname).map(
-          (bucketId, bucketIndex) =>
-            `activity_bucket_${index}_${bucketIndex} = flood(${queryOptionalBucket(
-              bucketId,
-              expectedSourceHostname(params, source)
-            )});
-${variable} = union_no_overlap(${variable}, activity_bucket_${index}_${bucketIndex});`
-        ),
-        `${variable} = sort_by_timestamp(${variable});`,
-        `${variable} = map_event_fields(${variable}, ${serializeQueryJson(
-          source.field_mappings
-        )});`,
-        `events = union_no_overlap(${variable}, events);`,
       ].join('\n');
     })
     .join('\n');
@@ -433,7 +477,10 @@ function resolvedActivityCoverageSources(params: DesktopQueryParams): ActivityCo
     .filter(source => source.bucket_ids.length > 0 || !source.builtin);
 }
 
-function activityCoverageEvents(params: DesktopQueryParams): string {
+export function activityCoverageEvents(
+  params: DesktopQueryParams,
+  internals: CanonicalPipelineInternals = {}
+): string {
   const sources = resolvedActivityCoverageSources(params);
   if (sources.length === 0) return '';
   requireCapability(params, RULE_ENGINE_CAPABILITIES.sourceNamespace, 'Activity coverage sources');
@@ -458,13 +505,21 @@ function activityCoverageEvents(params: DesktopQueryParams): string {
         `${variable} = [];`,
         ...resolveSourceBucketIds(source, params.hostname).map(
           (bucketId, bucketIndex) =>
-            `activity_coverage_bucket_${index}_${bucketIndex} = flood(${queryOptionalBucket(
+            `activity_coverage_bucket_${index}_${bucketIndex} = ${loadSourceBucket(
+              params,
+              source,
               bucketId,
-              expectedSourceHostname(params, source)
-            )});
-${variable} = union_no_overlap(${variable}, activity_coverage_bucket_${index}_${bucketIndex});`
+              expectedSourceHostname(params, source),
+              internals.bucketExpressions?.[source.source_id]?.[bucketIndex]
+            )};
+${variable} = concat(${variable}, activity_coverage_bucket_${index}_${bucketIndex});`
         ),
-        `activity_coverage_period_${index} = filter_period_intersect(${variable}, ${variable});`,
+        normalizeLoadedSource(params, source, variable),
+        `activity_coverage_period_${index} = filter_period_intersect(${variable}, ${
+          params.capabilities?.includes(RULE_ENGINE_CAPABILITIES.queryPeriod)
+            ? 'query_bounds'
+            : variable
+        });`,
         `events = period_union(events, activity_coverage_period_${index});`,
       ].join('\n');
     })
@@ -474,7 +529,6 @@ ${variable} = union_no_overlap(${variable}, activity_coverage_bucket_${index}_${
     .map((source, index) => {
       const variable = `activity_coverage_source_${index}`;
       return [
-        `${variable} = filter_period_intersect(${variable}, events);`,
         `activity_coverage_fields_${index} = ${serializeQueryJson(source.fields)};`,
         `activity_coverage_options_${index} = ${serializeQueryJson({
           source_id: source.source_id,
@@ -499,52 +553,16 @@ function activityCoverageActiveOverrides(params: DesktopQueryParams): string {
     .join('\n');
 }
 
-function backgroundActivityEvents(params: DesktopQueryParams): string {
-  const sources = params.background_sources ?? [];
-  if (sources.length === 0) return '';
-  requireCapability(params, RULE_ENGINE_CAPABILITIES.mapEventFields, 'Background activity sources');
-  if (!params.active_time_rule && !params.bid_afk) {
-    throw new Error('Background activity sources require an active-time rule or AFK source');
-  }
-
-  return sources
-    .map((source, index) => {
-      if (!/^[A-Za-z0-9_-]+$/.test(source.source_id)) {
-        throw new Error("Background source_id may only contain letters, numbers, '_' and '-'");
-      }
-      if (source.bucket_ids.length === 0) {
-        throw new Error('Background source must contain at least one bucket_id');
-      }
-      const variable = `background_source_${index}`;
-      return [
-        `${variable} = [];`,
-        ...resolveSourceBucketIds(source, params.hostname).map(
-          (bucketId, bucketIndex) =>
-            `background_bucket_${index}_${bucketIndex} = flood(${queryOptionalBucket(
-              bucketId,
-              expectedSourceHostname(params, source)
-            )});
-${variable} = union_no_overlap(${variable}, background_bucket_${index}_${bucketIndex});`
-        ),
-        `${variable} = filter_period_intersect(${variable}, not_afk);`,
-        `${variable} = map_event_fields(${variable}, ${serializeQueryJson(
-          source.field_mappings
-        )});`,
-        `${variable} = sort_by_timestamp(${variable});`,
-        `events = union_no_overlap(events, ${variable});`,
-      ].join('\n');
-    })
-    .join('\n');
-}
-
-export function activeTimeEvents(params: DesktopQueryParams): string {
+export function activeTimeEvents(
+  params: DesktopQueryParams,
+  internals: CanonicalPipelineInternals = {}
+): string {
   if (!params.active_time_rule) return '';
   requireCapability(params, RULE_ENGINE_CAPABILITIES.activePeriods, 'Active-time expressions');
 
+  // Source-free expressions such as {type: "none"}, including nested none
+  // groups, are meaningful masks and are evaluated against an empty source list.
   const sources = params.active_time_sources ?? [];
-  if (sources.length === 0) {
-    throw new Error('Active-time expressions require at least one source');
-  }
   const sourceVariables = sources.map((configuredSource, index) => {
     const source = {
       ...configuredSource,
@@ -560,19 +578,30 @@ export function activeTimeEvents(params: DesktopQueryParams): string {
       throw new Error("Active-time source_id may only contain letters, numbers, '_' and '-'");
     }
     const variable = `active_source_${index}`;
+    const alias = internals.activeAliases?.[source.source_id];
     return {
       source,
       variable,
       code: [
-        `${variable} = [];`,
-        ...resolveSourceBucketIds(source, params.hostname).map(
-          bucketId =>
-            `${variable} = concat(${variable}, flood(${queryOptionalBucket(
-              bucketId,
-              expectedSourceHostname(params, source)
-            )}));`
-        ),
-      ].join('\n'),
+        alias
+          ? `${variable} = ${alias};`
+          : [
+              `${variable} = [];`,
+              ...resolveSourceBucketIds(source, params.hostname).map(
+                (bucketId, bucketIndex) =>
+                  `${variable} = concat(${variable}, ${loadSourceBucket(
+                    params,
+                    source,
+                    bucketId,
+                    expectedSourceHostname(params, source),
+                    internals.bucketExpressions?.[source.source_id]?.[bucketIndex]
+                  )});`
+              ),
+              normalizeLoadedSource(params, source, variable),
+            ].join('\n'),
+      ]
+        .filter(Boolean)
+        .join('\n'),
     };
   });
   const namedSources = sourceVariables.map(({ source, variable }) => [source.source_id, variable]);
@@ -587,32 +616,34 @@ export function activeTimeEvents(params: DesktopQueryParams): string {
     `not_afk = active_periods_v2(active_time_sources, active_time_rule${
       params.hostname ? `, ${serializeQueryJson(params.hostname)}` : ''
     });`,
-    'not_afk = period_union(not_afk, []);',
   ].join('\n');
 }
 
-export function activeTimeQuery(params: {
-  hostname?: string;
-  active_time_rule: RuleExpressionV2;
-  active_time_sources: ActiveTimeSource[];
-  capabilities?: string[];
-  return_variable_suffix?: string;
-}): string {
-  const desktopParams: DesktopQueryParams = {
-    hostname: params.hostname,
-    active_time_rule: params.active_time_rule,
-    active_time_sources: params.active_time_sources,
-    capabilities: params.capabilities,
-    categories: [],
-    filter_categories: null,
-    filter_afk: false,
-  };
-  return [
-    activeTimeEvents(desktopParams),
-    params.return_variable_suffix
-      ? `not_afk_${params.return_variable_suffix} = not_afk;`
-      : 'RETURN = not_afk;',
-  ].join('\n');
+function auxiliarySourceEvents(
+  params: DesktopQueryParams,
+  internals: CanonicalPipelineInternals
+): string {
+  return (internals.auxiliarySources ?? [])
+    .map((source, index) => {
+      const variable = `auxiliary_source_${index}`;
+      return [
+        `${variable} = [];`,
+        ...resolveSourceBucketIds(source, params.hostname).map(
+          (bucketId, bucketIndex) =>
+            `${variable} = concat(${variable}, ${loadSourceBucket(
+              params,
+              source,
+              bucketId,
+              expectedSourceHostname(params, source),
+              internals.bucketExpressions?.[source.source_id]?.[bucketIndex]
+            )});`
+        ),
+        normalizeLoadedSource(params, source, variable),
+      ]
+        .filter(Boolean)
+        .join('\n');
+    })
+    .join('\n');
 }
 
 // Resolves a per-host activity profile into categorized activity events.
@@ -621,142 +652,377 @@ export function activeTimeQuery(params: {
 //  - Categorization (if categories specified)
 //  - Filters by category (if filter_categories set)
 // Puts it's results in `events` and `not_afk` (if not_afk available for platform).
-export function resolveActivityProfile(params: DesktopQueryParams | AndroidQueryParams): string {
-  // Query2 strings preserve raw backslashes instead of decoding JSON escapes.
-  const categories_str = params.categories ? serializeQueryJson(params.categories) : '';
-  const always_active_pattern_str = isDesktopParams(params)
-    ? params.always_active_pattern
-    : undefined;
-  const cat_filter_str = serializeQueryJson(params.filter_categories);
-  const hasCategorySpecs = params.category_specs !== undefined;
-  const category_specs = params.category_specs ?? [];
-  const hasActiveTimeRule = isDesktopParams(params) && !!params.active_time_rule;
-  const legacyWindowMode = isDesktopParams(params)
-    ? params.legacy_window_mode ?? 'activity'
-    : 'none';
-  const legacyWindowFields = isDesktopParams(params)
-    ? params.legacy_window_fields ?? ['app', 'title']
-    : [];
-  const supportsSourceNamespace =
-    params.capabilities?.includes(RULE_ENGINE_CAPABILITIES.sourceNamespace) ?? false;
-  if (
-    isDesktopParams(params) &&
-    params.bid_window &&
-    legacyWindowMode === 'context' &&
-    !supportsSourceNamespace
-  ) {
+function legacyBucketSelector(bucketId: string, hostname?: string): string {
+  const args = [serializeQueryString(bucketId, 'Bucket ID')];
+  if (hostname) args.push(serializeQueryJson(hostname));
+  return `find_bucket(${args.join(', ')})`;
+}
+
+interface LegacyBrowserStream {
+  browserName: string;
+  variable: string;
+  focusVariable: string;
+  focusSourceId: string;
+}
+
+interface LegacyV2Adaptation {
+  queryParams: CanonicalQueryParamsV2;
+  internals: CanonicalPipelineInternals;
+  browserStreams: LegacyBrowserStream[];
+  stopwatchVariable?: string;
+}
+
+function browserFamilyFocusRule(sourceId: string, browserName: string): RuleExpressionV2 {
+  const rules: RuleExpressionV2[] = [];
+  if (browserAppNames[browserName].length > 0) {
+    const exactNames = browserAppNames[browserName]
+      .map(name => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+      .join('|');
+    rules.push({
+      type: 'regex',
+      source: sourceId,
+      field: 'app',
+      regex: `^(?:${exactNames})$`,
+    });
+  }
+  if (browserAppNameRegex[browserName]) {
+    rules.push({
+      type: 'regex',
+      source: sourceId,
+      field: 'app',
+      regex: browserAppNameRegex[browserName],
+    });
+  }
+  return rules.length === 1 ? rules[0] : { type: 'any', rules };
+}
+
+function adaptDesktopQueryToV2(params: DesktopQueryParams): LegacyV2Adaptation {
+  if (params.activity_sources?.length || params.background_sources?.length) {
     throw new Error(
-      `Legacy window context requires server capability ${RULE_ENGINE_CAPABILITIES.sourceNamespace}`
+      'Deprecated replacement/background sources require the explicit resolveLegacyActivityProfile API'
     );
   }
-  const category_specs_str = serializeQueryJson(category_specs);
-  if (hasCategorySpecs) {
-    requireCapability(params, RULE_ENGINE_CAPABILITIES.categorize, 'Flexible categorization');
-    if (params.explain_categories) {
-      requireCapability(
-        params,
-        RULE_ENGINE_CAPABILITIES.explainCategorize,
-        'Category explanations'
-      );
+  const coverage = [...(params.activity_coverage_sources ?? [])];
+  const context = [...(params.context_sources ?? [])];
+  const internals: CanonicalPipelineInternals = {
+    bucketExpressions: {},
+    activeAliases: {},
+    auxiliarySources: [],
+  };
+  const windowMode = params.legacy_window_mode ?? 'activity';
+  if (windowMode === 'none' && params.always_active_pattern) {
+    throw new Error(
+      "always_active_pattern requires a legacy window projection; legacy_window_mode='none' is unsupported"
+    );
+  }
+  let projectionVariable = 'events';
+  if (params.bid_window && windowMode !== 'none') {
+    const windowSource = {
+      source_id: 'builtin_window',
+      builtin: 'window' as const,
+      bucket_ids: [params.bid_window],
+      interval_policy: 'heartbeat' as const,
+      scope: params.hostname ? ('host' as const) : ('global' as const),
+      ...(params.hostname ? { host: params.hostname } : {}),
+      fields: params.legacy_window_fields ?? ['app', 'title'],
+    };
+    internals.bucketExpressions.builtin_window = [
+      legacyBucketSelector(params.bid_window, params.hostname),
+    ];
+    if (windowMode === 'activity') {
+      coverage.unshift(windowSource);
+      projectionVariable = 'activity_coverage_source_0';
+    } else {
+      context.unshift({ ...windowSource, conflict: 'base_wins' as const });
+      projectionVariable = 'context_0';
+    }
+  }
+  let stopwatchVariable: string | undefined;
+  if (params.bid_stopwatch) {
+    stopwatchVariable = `activity_coverage_source_${coverage.length}`;
+    coverage.push({
+      source_id: 'stopwatch',
+      builtin: 'stopwatch',
+      bucket_ids: [params.bid_stopwatch],
+      interval_policy: 'exact',
+      scope: 'global',
+      fields: ['label'],
+      keeps_active: true,
+    });
+  }
+
+  const hasCustomActiveRule = !!params.active_time_rule;
+  const activeBranches: RuleExpressionV2[] = params.active_time_rule
+    ? [params.active_time_rule]
+    : [];
+  const activeSources = [...(params.active_time_sources ?? [])];
+  const occupiedSourceIds = new Set([
+    ...coverage.map(source => source.source_id),
+    ...context.map(source => source.source_id),
+    ...activeSources.map(source => source.source_id),
+    ...(params.activity_sources ?? []).map(source => source.source_id),
+    ...(params.background_sources ?? []).map(source => source.source_id),
+  ]);
+
+  if (!hasCustomActiveRule && params.bid_afk) {
+    const afkSourceId = allocateGeneratedSourceId(occupiedSourceIds, 'afk');
+    activeSources.push({
+      source_id: afkSourceId,
+      builtin: 'afk',
+      bucket_ids: [params.bid_afk],
+      interval_policy: 'heartbeat',
+      scope: params.hostname ? 'host' : 'global',
+      ...(params.hostname ? { host: params.hostname } : {}),
+    });
+    internals.bucketExpressions[afkSourceId] = [
+      legacyBucketSelector(params.bid_afk, params.hostname),
+    ];
+    activeBranches.push({
+      type: 'regex',
+      source: afkSourceId,
+      field: 'status',
+      regex: '^not-afk$',
+    });
+  }
+
+  const ensureWindowActiveSource = () => {
+    if (!params.bid_window) return;
+    if (!activeSources.some(source => source.source_id === 'builtin_window')) {
+      activeSources.push({
+        source_id: 'builtin_window',
+        builtin: 'window',
+        bucket_ids: [params.bid_window],
+        interval_policy: 'heartbeat',
+        scope: params.hostname ? 'host' : 'global',
+        ...(params.hostname ? { host: params.hostname } : {}),
+      });
+    }
+    internals.activeAliases.builtin_window = projectionVariable;
+  };
+
+  if (!hasCustomActiveRule && params.always_active_pattern && params.bid_window) {
+    ensureWindowActiveSource();
+    activeBranches.push({
+      type: 'regex',
+      source: 'builtin_window',
+      fields: ['app', 'title'],
+      regex: params.always_active_pattern,
+    });
+  }
+
+  const browserStreams: LegacyBrowserStream[] = [];
+  const audibleBranches: RuleExpressionV2[] = [];
+  for (const [browserName, bucketIds] of browserFamiliesWithBuckets(params.bid_browsers ?? [])) {
+    const useForAudible = !!params.include_audible && !hasCustomActiveRule && !!params.bid_window;
+    const sourceId = allocateGeneratedSourceId(
+      occupiedSourceIds,
+      useForAudible
+        ? `browser_audible_${browserStreams.length}`
+        : `browser_projection_${browserStreams.length}`
+    );
+    const source: ActiveTimeSource = {
+      source_id: sourceId,
+      builtin: 'browser',
+      bucket_ids: [...bucketIds],
+      interval_policy: 'heartbeat',
+      scope: 'global',
+    };
+    let variable: string;
+    if (useForAudible) {
+      const activeIndex = activeSources.length;
+      activeSources.push(source);
+      variable = `active_source_${activeIndex}`;
+      ensureWindowActiveSource();
+      audibleBranches.push({
+        type: 'all',
+        rules: [
+          {
+            type: 'regex',
+            source: sourceId,
+            field: 'audible',
+            regex: '^true$',
+            value_mode: 'scalar',
+          },
+          browserFamilyFocusRule('builtin_window', browserName),
+        ],
+      });
+    } else {
+      const auxiliaryIndex = internals.auxiliarySources.length;
+      internals.auxiliarySources.push(source);
+      variable = `auxiliary_source_${auxiliaryIndex}`;
+    }
+    browserStreams.push({
+      browserName,
+      variable,
+      focusVariable: projectionVariable,
+      focusSourceId: 'builtin_window',
+    });
+  }
+  activeBranches.push(...audibleBranches);
+  const activeRule =
+    activeBranches.length === 0
+      ? undefined
+      : activeBranches.length === 1
+      ? activeBranches[0]
+      : { type: 'any' as const, rules: activeBranches };
+
+  return {
+    internals,
+    browserStreams,
+    stopwatchVariable,
+    queryParams: {
+      hostname: params.hostname,
+      // Legacy categorization is an output projection. Running it here would
+      // expose v2 diagnostics and would evaluate select_keys before old root
+      // app/title fields have been restored.
+      category_specs: undefined,
+      explain_categories: params.explain_categories,
+      context_sources: context.map(source => ({
+        ...source,
+        interval_policy: source.interval_policy ?? 'exact',
+      })),
+      activity_coverage_sources: coverage.map(source => ({
+        ...source,
+        interval_policy: source.interval_policy ?? 'exact',
+      })),
+      active_time_rule: activeRule,
+      active_time_sources: activeSources.map(source => ({
+        ...source,
+        interval_policy: source.interval_policy ?? 'exact',
+      })),
+      capabilities: params.capabilities,
+      filter_categories: null,
+      filter_afk: params.filter_afk,
+    },
+  };
+}
+
+// Compatibility entry point: capable current servers normalize legacy desktop
+// inputs into the one v2 source pipeline. Android and genuinely old servers are
+// the automatic legacy boundary; deprecated replacement/background callers must
+// opt into the exported resolveLegacyActivityProfile API.
+export function resolveActivityProfile(params: DesktopQueryParams | AndroidQueryParams): string {
+  const capabilities = params.capabilities ?? [];
+  const currentServer = [
+    RULE_ENGINE_CAPABILITIES.categorize,
+    RULE_ENGINE_CAPABILITIES.sourceNamespace,
+    RULE_ENGINE_CAPABILITIES.activePeriods,
+    RULE_ENGINE_CAPABILITIES.optionalRawBucket,
+    RULE_ENGINE_CAPABILITIES.queryPeriod,
+    RULE_ENGINE_CAPABILITIES.floodV2,
+  ].every(capability => capabilities.includes(capability));
+  if (!isDesktopParams(params) || !currentServer) return resolveLegacyActivityProfile(params);
+
+  const adaptation = adaptDesktopQueryToV2(params);
+  let query = resolveActivityProfileV2Internal(adaptation.queryParams, adaptation.internals);
+  const windowMode = params.legacy_window_mode ?? 'activity';
+  if (params.bid_window && windowMode !== 'none') {
+    const sourceVariable = windowMode === 'activity' ? 'activity_coverage_source_0' : 'context_0';
+    // Project the historical root shape from source facts already loaded by the
+    // v2 pipeline. Rebuild non-stopwatch coverage before applying stopwatch-first
+    // precedence so its coverage is not present twice in the legacy output.
+    if (adaptation.stopwatchVariable) {
+      const stopwatchIndex = Number(adaptation.stopwatchVariable.split('_').pop());
+      query += '\nevents = [];';
+      (adaptation.queryParams.activity_coverage_sources ?? []).forEach((_source, index) => {
+        if (index !== stopwatchIndex) {
+          query += `\nevents = period_union(events, activity_coverage_period_${index});`;
+        }
+      });
+      if (params.filter_afk) query += '\nevents = filter_period_intersect(events, not_afk);';
+    } else {
+      query += `\nevents = period_union([], events);`;
+    }
+    query += `\nevents = merge_subwatcher_fields(events, ${sourceVariable}, ${serializeQueryJson(
+      params.legacy_window_fields ?? ['app', 'title']
+    )});`;
+    const coverageOffset = windowMode === 'activity' ? 1 : 0;
+    (params.activity_coverage_sources ?? []).forEach((source, index) => {
+      const sourceIndex = index + coverageOffset;
+      query += `\nevents = merge_subwatcher_fields(events, activity_coverage_source_${sourceIndex}, ${serializeQueryJson(
+        source.fields
+      )}, ${serializeQueryJson({
+        source_id: source.source_id,
+        conflict: 'base_wins',
+      })});`;
+    });
+    const contextOffset = windowMode === 'context' ? 1 : 0;
+    (params.context_sources ?? []).forEach((source, index) => {
+      query += `\nevents = merge_subwatcher_fields(events, context_${
+        index + contextOffset
+      }, ${serializeQueryJson(source.fields)}, ${serializeQueryJson({
+        source_id: source.source_id,
+        conflict: source.conflict ?? 'base_wins',
+      })});`;
+    });
+    if (params.category_specs !== undefined) {
+      query += `\nevents = merge_subwatcher_fields(events, ${sourceVariable}, ${serializeQueryJson(
+        params.legacy_window_fields ?? ['app', 'title']
+      )}, ${serializeQueryJson({ source_id: 'builtin_window', conflict: 'base_wins' })});`;
     }
   }
 
-  return [
-    'events = [];',
-    isDesktopParams(params) && params.bid_window && legacyWindowMode !== 'none'
-      ? `legacy_activity = flood(${queryBucket(params.bid_window)});` +
-        (legacyWindowMode === 'activity'
-          ? supportsSourceNamespace
-            ? `
-         legacy_activity_period = filter_period_intersect(legacy_activity, legacy_activity);
-         events = period_union(events, legacy_activity_period);`
-            : '\n         events = legacy_activity;'
-          : '')
-      : isAndroidParams(params)
-      ? `events = flood(${queryBucket(params.bid_android)});`
-      : '',
-    params.bid_stopwatch
-      ? `stopwatch_events = flood(query_bucket(${serializeQueryString(
-          params.bid_stopwatch,
-          'Stopwatch bucket ID'
-        )}));`
-      : 'stopwatch_events = [];',
-    isDesktopParams(params) && params.bid_stopwatch && supportsSourceNamespace
-      ? `stopwatch_period = filter_period_intersect(stopwatch_events, stopwatch_events);
-         events = period_union(events, stopwatch_period);
-         events = merge_subwatcher_fields(events, stopwatch_events, ["label"]);`
-      : '',
-    isDesktopParams(params) ? activityCoverageEvents(params) : '',
-    isDesktopParams(params) &&
-    params.bid_window &&
-    legacyWindowMode !== 'none' &&
-    supportsSourceNamespace
-      ? `events = merge_subwatcher_fields(events, legacy_activity, ${serializeQueryJson(
-          legacyWindowFields
-        )});`
-      : '',
-    isDesktopParams(params) ? replacementActivityEvents(params) : '',
-    isDesktopParams(params) && !hasActiveTimeRule
-      ? params.bid_afk
-        ? `not_afk = flood(${queryBucket(params.bid_afk)});
-         not_afk = filter_keyvals(not_afk, "status", ["not-afk"]);` +
-          (always_active_pattern_str
-            ? `not_treat_as_afk = filter_keyvals_regex(events, "app", ${serializeQueryJson(
-                always_active_pattern_str
-              )});
-             not_afk = period_union(not_afk, not_treat_as_afk);
-             not_treat_as_afk = filter_keyvals_regex(events, "title", ${serializeQueryJson(
-               always_active_pattern_str
-             )});
-             not_afk = period_union(not_afk, not_treat_as_afk);`
-            : '')
-        : 'not_afk = [];'
-      : '',
-    // Fetch browser events
-    isDesktopParams(params) && params.bid_browsers
-      ? browserEvents(params) +
-        // Include focused and audible browser events as indications of not-afk
-        (params.include_audible && !hasActiveTimeRule
-          ? `audible_events = filter_keyvals(browser_events, "audible", [true]);
-             not_afk = period_union(not_afk, audible_events);`
-          : '')
-      : '',
-    isDesktopParams(params) ? activeTimeEvents(params) : '',
-    isDesktopParams(params) && params.filter_afk
-      ? hasActiveTimeRule || params.bid_afk
-        ? 'events = filter_period_intersect(events, not_afk);'
-        : (() => {
-            throw new Error('Active filtering requires an active-time rule or AFK source');
-          })()
-      : '',
-    params.bid_stopwatch && !supportsSourceNamespace
-      ? 'events = union_no_overlap(stopwatch_events, events);'
-      : '',
-    isDesktopParams(params) ? backgroundActivityEvents(params) : '',
-    contextEvents(params),
-    // Categorize
-    hasCategorySpecs
-      ? `events = ${
-          params.explain_categories ? 'categorize_v2_explain' : 'categorize_v2'
-        }(events, ${category_specs_str}${
-          params.hostname ? `, ${serializeQueryJson(params.hostname)}` : ''
-        });`
-      : params.categories
-      ? `events = categorize(events, ${categories_str});`
-      : '',
-    // Filter out selected categories
-    params.filter_categories
-      ? `events = filter_keyvals(events, "$category", ${cat_filter_str});`
-      : '',
-    // "Return" events by setting variable named with return_variable if set
-    params.return_variable_suffix
-      ? `events_${params.return_variable_suffix} = events;
-         not_afk_${params.return_variable_suffix} = not_afk;`
-      : '',
-  ].join('\n');
+  if (adaptation.stopwatchVariable) {
+    query += `\nstopwatch_events = filter_period_intersect(${adaptation.stopwatchVariable}, query_bounds);`;
+    query += '\nevents = union_no_overlap(stopwatch_events, events);';
+  } else {
+    query += '\nstopwatch_events = [];';
+  }
+
+  if (params.category_specs !== undefined) {
+    query += `\nevents = ${
+      params.explain_categories ? 'categorize_v2_explain' : 'categorize_v2'
+    }(events, ${serializeQueryJson(params.category_specs)}${
+      params.hostname ? `, ${serializeQueryJson(params.hostname)}` : ''
+    });`;
+  } else {
+    // `categorize`, including an explicit empty list, is the old output-shape
+    // adapter: it preserves select_keys over projected/namespaced fields and
+    // does not leak v2 score/rule diagnostics.
+    query += `\nevents = categorize(events, ${serializeQueryJson(params.categories ?? [])});`;
+  }
+  if ((params.filter_categories?.length ?? 0) > 0) {
+    query += `\nevents = filter_keyvals(events, "$category", ${serializeQueryJson(
+      params.filter_categories
+    )});`;
+  }
+  if (adaptation.stopwatchVariable) {
+    query += '\nstopwatch_events = filter_period_intersect(stopwatch_events, events);';
+  }
+  if (params.return_variable_suffix) {
+    query += `\nevents_${params.return_variable_suffix} = events;`;
+    query += `\nnot_afk_${params.return_variable_suffix} = not_afk;`;
+  }
+  query += '\nbrowser_events = [];';
+  adaptation.browserStreams.forEach(
+    ({ browserName, variable, focusVariable, focusSourceId }, index) => {
+      const focusRule = browserFamilyFocusRule(focusSourceId, browserName);
+      query += `\nbrowser_focus_rule_${index} = ${serializeQueryJson(focusRule)};`;
+      query += `\nbrowser_focus_${index} = active_periods_v2([[${serializeQueryJson(
+        focusSourceId
+      )}, ${focusVariable}]], browser_focus_rule_${index}${
+        params.hostname ? `, ${serializeQueryJson(params.hostname)}` : ''
+      });`;
+      query += `\nbrowser_focus_${index} = filter_period_intersect(query_bounds, browser_focus_${index});`;
+      query += `\n${projectBrowserEvents(
+        `browser_focus_${index}`,
+        variable,
+        `browser_${browserName}_projected`,
+        ['url', 'title', 'audible', 'incognito', 'tabCount']
+      )}`;
+      query += `\nbrowser_${browserName} = filter_keyvals_regex(browser_${browserName}_projected, "url", ".");`;
+      query += `\nbrowser_${browserName} = split_url_events(browser_${browserName});`;
+      query += `\nbrowser_events = concat(browser_events, browser_${browserName});`;
+    }
+  );
+  if (adaptation.browserStreams.length > 0) {
+    query += '\nbrowser_events = sort_by_timestamp(browser_events);';
+    query += '\nbrowser_events = filter_period_intersect(browser_events, query_bounds);';
+    query += '\nbrowser_events = filter_period_intersect(browser_events, events);';
+  }
+  return query;
 }
 
-// Compatibility entry point retained for custom UIs and existing query-builder consumers.
 export function canonicalEvents(params: DesktopQueryParams | AndroidQueryParams): string {
   return resolveActivityProfile(params);
 }
@@ -788,6 +1054,15 @@ export interface CanonicalQueryParamsV2 {
 }
 
 export function resolveActivityProfileV2(params: CanonicalQueryParamsV2): string {
+  return resolveActivityProfileV2Internal(params, {});
+}
+
+function resolveActivityProfileV2Internal(
+  params: CanonicalQueryParamsV2,
+  internals: CanonicalPipelineInternals
+): string {
+  requireCapability(params, RULE_ENGINE_CAPABILITIES.optionalRawBucket, 'Original source bounds');
+  requireCapability(params, RULE_ENGINE_CAPABILITIES.queryPeriod, 'Query coverage bounds');
   const hasCategorySpecs = params.category_specs !== undefined;
   const category_specs = params.category_specs ?? [];
   if (hasCategorySpecs) {
@@ -801,13 +1076,22 @@ export function resolveActivityProfileV2(params: CanonicalQueryParamsV2): string
     }
   }
   const hasActiveTimeRule = !!params.active_time_rule;
+  const hasKeepsActiveCoverage = (params.activity_coverage_sources ?? []).some(
+    source => source.keeps_active
+  );
+  const filterAfk = params.filter_afk ?? true;
+  if (filterAfk && !hasActiveTimeRule && !hasKeepsActiveCoverage) {
+    throw new Error(
+      'Active filtering requires an active-time rule or a keeps-active coverage source'
+    );
+  }
   // Adapt to the shared source-only helpers without ever setting a root/legacy
   // field (no bid_window, bid_afk, legacy_window_mode, always_active_pattern).
   const helperParams: DesktopQueryParams = {
     hostname: params.hostname,
     categories: [],
     filter_categories: params.filter_categories,
-    filter_afk: params.filter_afk ?? false,
+    filter_afk: filterAfk,
     category_specs: params.category_specs,
     explain_categories: params.explain_categories,
     context_sources: params.context_sources,
@@ -818,17 +1102,23 @@ export function resolveActivityProfileV2(params: CanonicalQueryParamsV2): string
     return_variable_suffix: params.return_variable_suffix,
   };
   return [
+    'query_bounds = query_period();',
     'events = [];',
     hasActiveTimeRule ? '' : 'not_afk = [];',
-    activityCoverageEvents(helperParams),
-    activeTimeEvents(helperParams),
-    params.filter_afk ? activityCoverageActiveOverrides(helperParams) : '',
-    params.filter_afk
-      ? hasActiveTimeRule
-        ? 'events = filter_period_intersect(events, not_afk);'
-        : 'events = filter_period_intersect(events, not_afk);'
-      : '',
-    contextEvents(helperParams),
+    activityCoverageEvents(helperParams, internals),
+    auxiliarySourceEvents(helperParams, internals),
+    // Context facts are loaded before active-time aliases can refer to them.
+    contextEvents(helperParams, internals),
+    activeTimeEvents(helperParams, internals),
+    // `not_afk` is the effective active mask whether or not this particular
+    // query filters its event output. History and availability rely on the same
+    // keeps-active coverage as full reports.
+    activityCoverageActiveOverrides(helperParams),
+    // Normalize after every active contribution so all current builders expose
+    // one period representation before clipping canonical events.
+    'not_afk = period_union(not_afk, []);',
+    'not_afk = filter_period_intersect(not_afk, events);',
+    filterAfk ? 'events = filter_period_intersect(events, not_afk);' : '',
     hasCategorySpecs
       ? `events = ${
           params.explain_categories ? 'categorize_v2_explain' : 'categorize_v2'
@@ -836,7 +1126,7 @@ export function resolveActivityProfileV2(params: CanonicalQueryParamsV2): string
           params.hostname ? `, ${serializeQueryJson(params.hostname)}` : ''
         });`
       : '',
-    params.filter_categories
+    (params.filter_categories?.length ?? 0) > 0
       ? `events = filter_keyvals(events, "$category", ${serializeQueryJson(
           params.filter_categories
         )});`
@@ -903,7 +1193,7 @@ export function canonicalMultideviceEvents(params: MultiQueryParams): string {
     events = union_no_overlap(events, events_background_host_${i});
     `;
   }
-  if (params.filter_categories) {
+  if ((params.filter_categories?.length ?? 0) > 0) {
     query += `events = filter_keyvals(events, "$category", ${serializeQueryJson(
       params.filter_categories
     )});`;
@@ -922,9 +1212,18 @@ export function canonicalMultideviceEventsV2(
   perHostParams: CanonicalQueryParamsV2[],
   filterCategories?: string[][] | null
 ): string {
+  const effectiveFilter =
+    filterCategories === undefined
+      ? perHostParams.find(params => (params.filter_categories?.length ?? 0) > 0)
+          ?.filter_categories ?? null
+      : filterCategories;
   const prelude = perHostParams
     .map((params, index) =>
-      resolveActivityProfileV2({ ...params, return_variable_suffix: `host_${index}` })
+      resolveActivityProfileV2({
+        ...params,
+        filter_categories: null,
+        return_variable_suffix: `host_${index}`,
+      })
     )
     .join('\n');
   let query = `${prelude}\nevents = [];\nnot_afk = [];\n`;
@@ -934,131 +1233,21 @@ export function canonicalMultideviceEventsV2(
     not_afk = union_no_overlap(not_afk, not_afk_host_${i});
     `;
   }
-  if (filterCategories) {
+  if ((effectiveFilter?.length ?? 0) > 0) {
     query += `events = filter_keyvals(events, "$category", ${serializeQueryJson(
-      filterCategories
+      effectiveFilter
     )});`;
   }
   return query;
 }
 
-export function appQuery(
-  appbucket: string,
-  categories: Category[],
-  filter_categories: string[][],
-  advanced: Partial<
-    Pick<BaseQueryParams, 'hostname' | 'category_specs' | 'context_sources' | 'capabilities'>
-  > = {}
-): string[] {
-  const params: AndroidQueryParams = {
-    bid_android: appbucket,
-    categories,
-    filter_categories,
-    ...advanced,
-  };
+// Backwards-compatible export for callers/tests that import the established
+// process-pattern name from this module.
+export const browser_appname_regex = browserAppNameRegex;
 
-  const code = `
-    ${resolveActivityProfile(params)}
-
-    title_events = sort_by_duration(merge_events_by_keys(events, ["app", "classname"]));
-    app_events   = sort_by_duration(merge_events_by_keys(title_events, ["app"]));
-    cat_events   = sort_by_duration(merge_events_by_keys(events, ["$category"]));
-
-    events = sort_by_timestamp(events);
-    app_events  = limit_events(app_events, ${default_limit});
-    title_events  = limit_events(title_events, ${default_limit});
-    duration = sum_durations(events);
-    RETURN  = {"app_events": app_events, "title_events": title_events, "cat_events": cat_events, "duration": duration, "active_events": app_events};
-  `;
-  return queryStringToArray(code);
-}
-
-// Exact app names (Flatpak app IDs and similar reverse-domain identifiers) used for bucket discovery and as a
-// fallback for names that don't match the regex patterns below. Process name
-// variants (upper/lowercase, spacing, .exe suffix) are handled by
-// browser_appname_regex using (?i) flag. See test/unit/queries.test.node.ts for
-// the complete list of known app names these patterns cover.
-const browser_appnames: Record<string, string[]> = {
-  chrome: ['com.google.Chrome', 'com.google.ChromeDev', 'org.chromium.Chromium'],
-  firefox: ['org.mozilla.firefox', 'io.gitlab.librewolf-community', 'net.waterfox.waterfox'],
-  opera: ['com.opera.Opera'],
-  brave: ['com.brave.Browser'],
-  edge: ['com.microsoft.Edge', 'com.microsoft.EdgeDev'],
-  arc: [],
-  vivaldi: ['com.vivaldi.Vivaldi'],
-  orion: ['Orion'],
-  yandex: ['ru.yandex.Browser'],
-  zen: ['app.zen_browser.zen'],
-  floorp: ['one.ablaze.floorp'],
-  helium: ['net.imput.helium'],
-};
-
-// Returns a list of (browserName, bucketId) pairs for found browser buckets
-function browsersWithBuckets(browserbuckets: string[]): [string, string][] {
-  const browsername_to_bucketid: [string, string | undefined][] = _.map(
-    Object.keys(browser_appnames),
-    browserName => {
-      const bucketId = _.find(browserbuckets, bucket_id => _.includes(bucket_id, browserName));
-      return [browserName, bucketId];
-    }
-  );
-  // Skip browsers for which a bucket couldn't be found
-  return _.filter(browsername_to_bucketid, ([, bucketId]) => bucketId !== undefined);
-}
-
-// Case-insensitive regex patterns covering all OS/platform process name variants
-// (Windows .exe, Linux lowercase, macOS capitalized, versioned names like firefox-esr-esr140).
-// Used with filter_keyvals_regex in addition to the exact names in browser_appnames.
-// The full set of historical app names these patterns replace is documented in the unit tests.
-// See: test/unit/queries.test.node.ts, https://github.com/ActivityWatch/aw-webui/issues/749
-export const browser_appname_regex: Record<string, string> = {
-  chrome: '(?i)^(google[-_ ]?chrome|chrome|chromium)',
-  firefox: '(?i)(firefox|librewolf|waterfox|nightly)',
-  opera: '(?i)(opera)',
-  brave: '(?i)(brave)',
-  edge: '(?i)^(microsoft[-_ ]?edge|msedge)',
-  arc: '(?i)^arc(\\.exe)?$',
-  vivaldi: '(?i)(vivaldi)',
-  orion: '(?i)(orion)',
-  yandex: '(?i)(yandex)',
-  zen: '(?i)(zen)',
-  floorp: '(?i)(floorp)',
-  helium: '(?i)(helium)',
-};
-
-// Returns a list of active browser events (where the browser was the active window) from all browser buckets
-function browserEvents(params: DesktopQueryParams): string {
-  let code = `
-    browser_events = [];
-  `;
-
-  _.each(browsersWithBuckets(params.bid_browsers), ([browserName, bucketId]) => {
-    const browser_appnames_str = serializeQueryJson(browser_appnames[browserName]);
-    code += `events_${browserName} = flood(query_bucket(${serializeQueryString(
-      bucketId,
-      'Browser bucket ID'
-    )}));
-       window_${browserName} = filter_keyvals(events, "app", ${browser_appnames_str});`;
-
-    // Add regex-based matching to cover case/spacing/versioning variants (e.g., Firefox.exe, firefox-esr-esr140)
-    const pattern = browser_appname_regex[browserName];
-    if (pattern) {
-      code += `
-       window_${browserName}_re = filter_keyvals_regex(events, "app", ${serializeQueryJson(
-        pattern
-      )});
-       window_${browserName} = sort_by_timestamp(concat(window_${browserName}, window_${browserName}_re));`;
-    }
-
-    code += `
-       events_${browserName} = filter_period_intersect(events_${browserName}, window_${browserName});
-       events_${browserName} = split_url_events(events_${browserName});
-       browser_events = concat(browser_events, events_${browserName});
-       browser_events = sort_by_timestamp(browser_events);`;
-  });
-  return code;
-}
-
+// Returns active browser events (where the browser was the active window).
+// Keep the legacy builder's historical one-bucket-per-browser selection; the v2
+// report path below handles every bucket with explicit host ownership.
 export function fullDesktopQuery(params: DesktopQueryParams): string[] {
   return queryStringToArray(
     `
@@ -1163,7 +1352,7 @@ export interface ActivityReportParamsV2 extends CanonicalQueryParamsV2 {
   app_title_source_id?: string;
   // Configured source whose flat field includes app, used to detect browser focus.
   browser_focus_source_id?: string;
-  browser_bucket_ids?: string[];
+  browser_source?: ActivityCoverageSource;
   // Coverage source id under which stopwatch labels were merged.
   stopwatch_source_id?: string;
 }
@@ -1173,40 +1362,94 @@ function namespacedKey(sourceId: string, field: string): string {
 }
 
 // Browser enrichment for the v2 pipeline: focus is derived from an explicit
-// namespaced source key rather than a root app field.
-function browserEventsV2(browserBucketIds: string[], focusAppKey: string): string {
+// namespaced source key rather than a root app field. Padded raw events from
+// every bucket in one browser family are combined before one heartbeat pass and
+// the single projection which resolves latest-overlapping-event precedence.
+// Suffixes keep hosts/families independent.
+function browserEventsV2(
+  browserSource: ActivityCoverageSource,
+  focusAppKey: string,
+  canonicalEventsVariable = 'events',
+  browserEventsVariable = 'browser_events',
+  variableSuffix = 'single',
+  hostname?: string
+): string {
   let code = `
-    browser_events = [];
+    ${browserEventsVariable} = [];
   `;
-  _.each(browsersWithBuckets(browserBucketIds), ([browserName, bucketId]) => {
-    const browser_appnames_str = serializeQueryJson(browser_appnames[browserName]);
-    code += `events_${browserName} = flood(query_bucket(${serializeQueryString(
-      bucketId,
-      'Browser bucket ID'
-    )}));
-       window_${browserName} = filter_keyvals(events, ${serializeQueryJson(
+  const browserBucketIds = resolveSourceBucketIds(browserSource, hostname);
+  const expectedHostname = browserSource.scope === 'global' ? undefined : hostname;
+  const heartbeat = (browserSource.interval_policy ?? 'exact') === 'heartbeat';
+  const fields = [...browserSource.fields];
+  _.each(browserFamiliesWithBuckets(browserBucketIds), ([browserName, bucketIds], index) => {
+    const browserAppNamesJson = serializeQueryJson(browserAppNames[browserName]);
+    const browserVariable = `browser_${variableSuffix}_${index}`;
+    const focusVariable = `browser_focus_${variableSuffix}_${index}`;
+    code += `${browserVariable} = [];`;
+    _.each(bucketIds, bucketId => {
+      code += `
+       ${browserVariable} = concat(${browserVariable}, ${queryOptionalRawBucket(
+        bucketId,
+        expectedHostname,
+        heartbeat ? 5 : 0
+      )});`;
+    });
+    code += `
+       ${heartbeat ? `${browserVariable} = flood_v2(${browserVariable});` : ''}
+       ${browserVariable} = sort_by_timestamp(${browserVariable});
+       ${focusVariable} = filter_keyvals(${canonicalEventsVariable}, ${serializeQueryJson(
       focusAppKey
-    )}, ${browser_appnames_str});`;
-    const pattern = browser_appname_regex[browserName];
+    )}, ${browserAppNamesJson});`;
+    const pattern = browserAppNameRegex[browserName];
     if (pattern) {
       code += `
-       window_${browserName}_re = filter_keyvals_regex(events, ${serializeQueryJson(
+       ${focusVariable}_re = filter_keyvals_regex(${canonicalEventsVariable}, ${serializeQueryJson(
         focusAppKey
       )}, ${serializeQueryJson(pattern)});
-       window_${browserName} = sort_by_timestamp(concat(window_${browserName}, window_${browserName}_re));`;
+       ${focusVariable} = sort_by_timestamp(concat(${focusVariable}, ${focusVariable}_re));`;
     }
     code += `
-       events_${browserName} = filter_period_intersect(events_${browserName}, window_${browserName});
-       events_${browserName} = split_url_events(events_${browserName});
-       browser_events = concat(browser_events, events_${browserName});
-       browser_events = sort_by_timestamp(browser_events);`;
+       ${browserVariable}_presence = filter_period_intersect(${focusVariable}, ${browserVariable});
+       ${browserVariable}_presence = period_union(${browserVariable}_presence, []);
+       ${projectBrowserEvents(
+         `${browserVariable}_presence`,
+         browserVariable,
+         `${browserVariable}_projected`,
+         fields
+       )}
+       ${
+         fields.includes('url')
+           ? `${browserVariable} = filter_keyvals_regex(${browserVariable}_projected, "url", ".");
+       ${browserVariable} = split_url_events(${browserVariable});`
+           : `${browserVariable} = ${browserVariable}_projected;`
+       }
+       ${browserEventsVariable} = concat(${browserEventsVariable}, ${browserVariable});
+       ${browserEventsVariable} = sort_by_timestamp(${browserEventsVariable});`;
   });
   return code;
 }
 
+function projectBrowserEvents(
+  canonicalEventsVariable: string,
+  browserEventsVariable: string,
+  projectionVariable: string,
+  fields: string[]
+): string {
+  return `${projectionVariable} = merge_subwatcher_fields(
+    ${canonicalEventsVariable},
+    ${browserEventsVariable},
+    ${serializeQueryJson(fields)}
+  );`;
+}
+
 // Report tail shared by single- and multi-host v2 report builders. Operates on
 // an already-populated `events` (canonical, categorized) and `not_afk` variable.
-function activityReportTail(params: ActivityReportParamsV2): string {
+// Multihost callers provide browser preparation that has already applied the
+// same host precedence as canonical activity.
+function activityReportTail(
+  params: ActivityReportParamsV2,
+  preparedBrowserEvents?: string
+): string {
   const appKey = params.app_title_source_id
     ? namespacedKey(params.app_title_source_id, 'app')
     : undefined;
@@ -1219,6 +1462,7 @@ function activityReportTail(params: ActivityReportParamsV2): string {
   const stopwatchKey = params.stopwatch_source_id
     ? namespacedKey(params.stopwatch_source_id, 'label')
     : undefined;
+  const browserFields = params.browser_source?.fields ?? [];
 
   const appTitleSection =
     appKey && titleKey
@@ -1235,9 +1479,29 @@ function activityReportTail(params: ActivityReportParamsV2): string {
     title_events = [];
     app_events = [];`;
 
-  const browserSection = focusAppKey
-    ? browserEventsV2(params.browser_bucket_ids ?? [], focusAppKey)
-    : 'browser_events = [];';
+  const browserSection =
+    preparedBrowserEvents !== undefined
+      ? preparedBrowserEvents
+      : focusAppKey
+      ? params.browser_source
+        ? `${browserEventsV2(
+            params.browser_source,
+            focusAppKey,
+            'events',
+            'browser_events_raw',
+            'single',
+            params.hostname
+          )}
+         ${projectBrowserEvents('browser_events_raw', 'events', 'browser_projection_events', [
+           '$category',
+         ])}
+         browser_events = ${
+           params.browser_source.fields.includes('url')
+             ? 'filter_keyvals_regex(browser_projection_events, "url", ".")'
+             : 'browser_projection_events'
+         };`
+        : 'browser_events = [];'
+      : 'browser_events = [];';
 
   const stopwatchSection = stopwatchKey
     ? `stopwatch_events = merge_events_by_keys(events, [${serializeQueryJson(stopwatchKey)}]);
@@ -1248,21 +1512,30 @@ function activityReportTail(params: ActivityReportParamsV2): string {
        stopwatch_events = limit_events(stopwatch_events, ${default_limit});`
     : 'stopwatch_events = [];';
 
-  return `
-    ${appTitleSection}
-    cat_events   = sort_by_duration(merge_events_by_keys(events, ["$category"]));
-    duration = sum_durations(events);
-    ${browserSection}
-    browser_events = split_url_events(browser_events);
+  const browserUrlSection = browserFields.includes('url')
+    ? `browser_events = split_url_events(browser_events);
     browser_urls = merge_events_by_keys(browser_events, ["url"]);
     browser_urls = sort_by_duration(browser_urls);
     browser_urls = limit_events(browser_urls, ${default_limit});
     browser_domains = merge_events_by_keys(browser_events, ["$domain"]);
     browser_domains = sort_by_duration(browser_domains);
-    browser_domains = limit_events(browser_domains, ${default_limit});
-    browser_titles = merge_events_by_keys(browser_events, ["title"]);
+    browser_domains = limit_events(browser_domains, ${default_limit});`
+    : `browser_urls = [];
+    browser_domains = [];`;
+  const browserTitleSection = browserFields.includes('title')
+    ? `browser_title_events = filter_keyvals_regex(browser_events, "title", ".");
+    browser_titles = merge_events_by_keys(browser_title_events, ["title"]);
     browser_titles = sort_by_duration(browser_titles);
-    browser_titles = limit_events(browser_titles, ${default_limit});
+    browser_titles = limit_events(browser_titles, ${default_limit});`
+    : 'browser_titles = [];';
+
+  return `
+    ${appTitleSection}
+    cat_events   = sort_by_duration(merge_events_by_keys(events, ["$category"]));
+    duration = sum_durations(events);
+    ${browserSection}
+    ${browserUrlSection}
+    ${browserTitleSection}
     browser_duration = sum_durations(browser_events);
     ${stopwatchSection}
     RETURN = {
@@ -1293,45 +1566,107 @@ export function fullActivityQueryV2(params: ActivityReportParamsV2): string[] {
   );
 }
 
-// Multi-device v2 report: unions per-host canonical events and active periods,
-// then runs the same generic report tail. The app/title/browser/stopwatch
-// projection is taken from the shared configuration (source ids are identical
-// across hosts). Browser buckets from all hosts are supplied on `projection`.
+// Multi-device v2 report. Browser facts are first resolved against each host's
+// local focus stream, attached to that host's full canonical coverage, and only
+// then combined in host-priority order. This prevents a lower-priority host (or
+// the first bucket for a browser family) from supplying facts for another
+// host's winning activity slice.
 export function fullActivityMultiQueryV2(
-  perHostParams: CanonicalQueryParamsV2[],
-  projection: {
-    app_title_source_id?: string;
-    browser_focus_source_id?: string;
-    browser_bucket_ids?: string[];
-    stopwatch_source_id?: string;
-  }
+  perHostParams: ActivityReportParamsV2[],
+  filterCategories?: string[][] | null
 ): string[] {
+  const effectiveFilter =
+    filterCategories === undefined
+      ? perHostParams.find(params => (params.filter_categories?.length ?? 0) > 0)
+          ?.filter_categories ?? null
+      : filterCategories;
   const prelude = perHostParams
     .map((params, index) =>
-      resolveActivityProfileV2({ ...params, return_variable_suffix: `mdev_${index}` })
+      resolveActivityProfileV2({
+        ...params,
+        filter_categories: null,
+        return_variable_suffix: `mdev_${index}`,
+      })
     )
+    .join('\n');
+  const browserPrelude = perHostParams
+    .map((params, index) => {
+      const focusAppKey = params.browser_focus_source_id
+        ? namespacedKey(params.browser_focus_source_id, 'app')
+        : undefined;
+      const browserEventsVariable = `browser_events_mdev_${index}`;
+      const coverageVariable = `browser_host_coverage_mdev_${index}`;
+      if (!focusAppKey || !params.browser_source) {
+        return `${browserEventsVariable} = [];
+        ${coverageVariable} = period_union([], filter_period_intersect(query_bounds, events_mdev_${index}));
+        browser_projection_mdev_${index} = ${coverageVariable};`;
+      }
+      const loadBrowserEvents = browserEventsV2(
+        params.browser_source,
+        focusAppKey,
+        `events_mdev_${index}`,
+        browserEventsVariable,
+        `mdev_${index}`,
+        params.hostname
+      );
+      const projectionFields = [
+        '$category',
+        ...params.browser_source.fields,
+        ...(params.browser_source.fields.includes('url') ? ['$domain'] : []),
+      ];
+      return `${loadBrowserEvents}
+        ${coverageVariable} = period_union([], filter_period_intersect(query_bounds, events_mdev_${index}));
+        browser_presence_mdev_${index} = categorize_v2(${browserEventsVariable}, []);
+        ${projectBrowserEvents(
+          coverageVariable,
+          `browser_presence_mdev_${index}`,
+          `browser_projection_mdev_${index}`,
+          projectionFields
+        )}`;
+    })
     .join('\n');
   const unions = perHostParams
     .map(
       (_params, index) =>
         `events = union_no_overlap(events, events_mdev_${index});
-         not_afk = union_no_overlap(not_afk, not_afk_mdev_${index});`
+         not_afk = union_no_overlap(not_afk, not_afk_mdev_${index});
+         browser_projection_events = union_no_overlap(browser_projection_events, browser_projection_mdev_${index});`
     )
     .join('\n');
+  const postFilter =
+    (effectiveFilter?.length ?? 0) > 0
+      ? `events = filter_keyvals(events, "$category", ${serializeQueryJson(effectiveFilter)});
+       browser_projection_events = filter_period_intersect(browser_projection_events, events);`
+      : '';
+  const projection = {
+    app_title_source_id: perHostParams.find(params => params.app_title_source_id)
+      ?.app_title_source_id,
+    stopwatch_source_id: perHostParams.find(params => params.stopwatch_source_id)
+      ?.stopwatch_source_id,
+    browser_source: perHostParams.find(params => params.browser_source)?.browser_source,
+  };
   return queryStringToArray(
     `
     ${prelude}
+    ${browserPrelude}
     events = [];
     not_afk = [];
+    browser_projection_events = [];
     ${unions}
-    ${activityReportTail({
-      hostname: '',
-      filter_categories: null,
-      app_title_source_id: projection.app_title_source_id,
-      browser_focus_source_id: projection.browser_focus_source_id,
-      browser_bucket_ids: projection.browser_bucket_ids,
-      stopwatch_source_id: projection.stopwatch_source_id,
-    })}`
+    browser_projection_events = filter_keyvals(browser_projection_events, "$category", [["Uncategorized"]]);
+    ${postFilter}
+    ${activityReportTail(
+      {
+        hostname: '',
+        filter_categories: null,
+        app_title_source_id: projection.app_title_source_id,
+        stopwatch_source_id: projection.stopwatch_source_id,
+        browser_source: projection.browser_source,
+      },
+      projection.browser_source?.fields.includes('url')
+        ? 'browser_events = filter_keyvals_regex(browser_projection_events, "url", ".");'
+        : 'browser_events = browser_projection_events;'
+    )}`
   );
 }
 
@@ -1358,32 +1693,6 @@ export function editorActivityQuery(editorbuckets: string[]): string[] {
   return q;
 }
 
-// Returns a query that yields a single event with the duration set to
-// the sum of all non-afk time in the queried period
-// TODO: Would ideally account for `filter_afk` and `always_active_pattern`
-// TODO: rename to something like `activeDurationQuery`
-// FIXME: Doesn't respect audible-as-active and always-active-pattern
-export function activityQuery(afkbuckets: string[]): string[] {
-  let q = ['not_afk = [];'];
-  for (const afkbucket of afkbuckets) {
-    q = q.concat([
-      `not_afk_curr = query_bucket(${serializeQueryString(afkbucket, 'AFK bucket ID')});`,
-      `not_afk_curr = filter_keyvals(not_afk_curr, "status", ["not-afk"]);`,
-      `not_afk = union_no_overlap(not_afk, not_afk_curr);`,
-    ]);
-  }
-  q = q.concat(['not_afk = merge_events_by_keys(not_afk, ["status"]);', 'RETURN = not_afk;']);
-  return q;
-}
-
-// Equivalent function to activityQuery, but for Android (which doesn't have an afk bucket)
-export function activityQueryAndroid(androidbucket: string): string[] {
-  return [
-    `events = query_bucket(${serializeQueryString(androidbucket, 'Android bucket ID')});`,
-    'RETURN = sum_durations(events);',
-  ];
-}
-
 // Returns a query that yields a dict with a key "cat_events" which is an
 // array of one event per category, with the duration of each event set to the sum of the category durations.
 export function categoryQuery(
@@ -1408,20 +1717,37 @@ export function categoryActivityQueryV2(params: CanonicalQueryParamsV2): string[
   );
 }
 
-export function categoryActivityMultiQueryV2(perHostParams: CanonicalQueryParamsV2[]): string[] {
+export function categoryActivityMultiQueryV2(
+  perHostParams: CanonicalQueryParamsV2[],
+  filterCategories?: string[][] | null
+): string[] {
+  const effectiveFilter =
+    filterCategories === undefined
+      ? perHostParams.find(params => (params.filter_categories?.length ?? 0) > 0)
+          ?.filter_categories ?? null
+      : filterCategories;
   const prelude = perHostParams
     .map((params, index) =>
-      resolveActivityProfileV2({ ...params, return_variable_suffix: `mdev_${index}` })
+      resolveActivityProfileV2({
+        ...params,
+        filter_categories: null,
+        return_variable_suffix: `mdev_${index}`,
+      })
     )
     .join('\n');
   const unions = perHostParams
     .map((_params, index) => `events = union_no_overlap(events, events_mdev_${index});`)
     .join('\n');
+  const postFilter =
+    (effectiveFilter?.length ?? 0) > 0
+      ? `events = filter_keyvals(events, "$category", ${serializeQueryJson(effectiveFilter)});`
+      : '';
   return queryStringToArray(
     `
   ${prelude}
   events = [];
   ${unions}
+  ${postFilter}
   cat_events   = sort_by_duration(merge_events_by_keys(events, ["$category"]));
   RETURN = { "cat_events": cat_events };
 `
@@ -1433,9 +1759,6 @@ export default {
   fullActivityQueryV2,
   fullActivityMultiQueryV2,
   multideviceQuery,
-  appQuery,
-  activityQuery,
-  activityQueryAndroid,
   categoryQuery,
   categoryActivityQueryV2,
   categoryActivityMultiQueryV2,

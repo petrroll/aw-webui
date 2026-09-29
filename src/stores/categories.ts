@@ -12,17 +12,20 @@ import { getColorFromCategory } from '~/util/color';
 import { defineStore } from 'pinia';
 import { useSettingsStore } from '~/stores/settings';
 import {
-  deleteCategoryRuleV2,
-  collectRuleSourceIds,
-  synchronizeCategoryTreeV2,
-  updateCategoryRuleV2,
   validateProfileRulesV2,
   mergeSourceDefinitionChanges,
+  categorySetToLegacyClasses,
   type RuleExpressionV2,
   type SourceDefinitionV2,
 } from '~/util/rulesV2';
+import {
+  deleteCategoryRuleV2,
+  synchronizeCategoryTreeV2,
+  updateCategoryRuleV2,
+} from '~/util/rulesV2Editor';
 
 interface PendingV2Edit {
+  draftId?: string;
   categoryId?: string;
   originalName: string[];
   name: string[];
@@ -49,6 +52,8 @@ interface State {
   pending_v2_sources: SourceDefinitionV2[] | null;
   _rules_v2_dirty_sections: string[];
   replace_v2_rules_on_save: boolean;
+  editable_category_set_id: string | null;
+  editable_category_set_explicit: boolean;
 }
 
 function getScoreFromCategory(c: Category, allCats: Category[]): number {
@@ -91,6 +96,8 @@ export const useCategoryStore = defineStore('categories', {
     pending_v2_sources: null,
     _rules_v2_dirty_sections: [],
     replace_v2_rules_on_save: false,
+    editable_category_set_id: null,
+    editable_category_set_explicit: false,
   }),
 
   // getters
@@ -155,9 +162,14 @@ export const useCategoryStore = defineStore('categories', {
       };
     },
     pendingV2Edit(this: State) {
-      return (categoryId: string | undefined, name: string[]): PendingV2Edit | undefined => {
+      return (
+        categoryId: string | undefined,
+        name: string[],
+        draftId?: string
+      ): PendingV2Edit | undefined => {
         const edit = this.pending_v2_edits.find(candidate => {
           if ('delete' in candidate) return false;
+          if (draftId) return candidate.draftId === draftId;
           return categoryId
             ? candidate.categoryId === categoryId
             : _.isEqual(candidate.name, name) || _.isEqual(candidate.originalName, name);
@@ -224,13 +236,31 @@ export const useCategoryStore = defineStore('categories', {
   },
 
   actions: {
-    load(this: State, classes?: Category[]) {
-      const loadedClasses = classes ?? useSettingsStore().classes;
+    load(this: State, classes?: Category[], categorySetId?: string) {
+      const settingsStore = useSettingsStore();
+      const rules = settingsStore.rulesV2;
+      const selectedId =
+        categorySetId ??
+        rules.activity_profiles_v2[0]?.category_set_ids[0] ??
+        rules.category_sets_v2[0]?.id ??
+        null;
+      const selectedSet = rules.category_sets_v2.find(set => set.id === selectedId);
+      this.editable_category_set_id = selectedSet?.id ?? null;
+      this.editable_category_set_explicit = categorySetId !== undefined;
+      const loadedClasses =
+        classes ??
+        (categorySetId && selectedSet
+          ? categorySetToLegacyClasses(selectedSet)
+          : settingsStore.classes);
       this.classes = assignIds(createMissingParents(loadedClasses));
       this.classes_unsaved_changes = false;
       this.pending_v2_edits = [];
       this.pending_v2_sources = null;
       this.replace_v2_rules_on_save = false;
+    },
+
+    selectCategorySet(categorySetId: string) {
+      this.load(undefined, categorySetId);
     },
 
     async save(
@@ -239,13 +269,20 @@ export const useCategoryStore = defineStore('categories', {
       presentation?: ProfilePresentationV2
     ) {
       const settingsStore = useSettingsStore();
-      if (process.env.NODE_ENV === 'test' && !settingsStore.loaded) {
-        this.classes_unsaved_changes = false;
-        this.pending_v2_edits = [];
-        return;
-      }
       await settingsStore.ensureLoaded();
       const rules = settingsStore.rulesV2;
+      if (
+        !this.editable_category_set_explicit &&
+        (rules.activity_profiles_v2[0]?.category_set_ids.length ?? 0) > 1
+      ) {
+        throw new Error(
+          'Cannot save the combined category-set view; select a specific category set first'
+        );
+      }
+      const submittedEdits = _.cloneDeep(this.pending_v2_edits);
+      const submittedSources = _.cloneDeep(this.pending_v2_sources);
+      const submittedClasses = this.classes.map(cleanCategory);
+      const submittedReplaceRules = this.replace_v2_rules_on_save;
       let profiles = rules.activity_profiles_v2;
       let categorySets = rules.category_sets_v2;
       if (sourceSnapshot) {
@@ -266,7 +303,7 @@ export const useCategoryStore = defineStore('categories', {
         }
       }
       const profileId = profiles[0]?.id ?? 'default';
-      for (const edit of this.pending_v2_edits) {
+      for (const edit of submittedEdits) {
         const updated =
           'delete' in edit
             ? deleteCategoryRuleV2({
@@ -275,21 +312,23 @@ export const useCategoryStore = defineStore('categories', {
                 categorySets,
                 categoryId: edit.categoryId,
                 name: edit.name,
+                categorySetId: this.editable_category_set_id ?? undefined,
               })
             : updateCategoryRuleV2({
                 profileId,
                 profiles,
                 categorySets,
                 ...edit,
+                categorySetId: this.editable_category_set_id ?? undefined,
               });
         profiles = updated.profiles;
         categorySets = updated.categorySets;
       }
-      if (this.pending_v2_sources) {
+      if (submittedSources) {
         profiles = _.cloneDeep(profiles);
         profiles[0].sources = mergeSourceDefinitionChanges(
           profiles[0].sources,
-          this.pending_v2_sources,
+          submittedSources,
           []
         );
       }
@@ -297,22 +336,10 @@ export const useCategoryStore = defineStore('categories', {
         profileId,
         profiles,
         categorySets,
-        classes: this.classes.map(cleanCategory),
-        replaceRules: this.replace_v2_rules_on_save,
+        classes: submittedClasses,
+        replaceRules: submittedReplaceRules,
+        categorySetId: this.editable_category_set_id ?? undefined,
       });
-      const referencedSourceIds = new Set(
-        synchronized.categorySets[0].categories.flatMap(category => [
-          ...collectRuleSourceIds(category.rule),
-        ])
-      );
-      if (synchronized.profiles[0].active_time.type === 'expression') {
-        for (const sourceId of collectRuleSourceIds(synchronized.profiles[0].active_time.rule)) {
-          referencedSourceIds.add(sourceId);
-        }
-      }
-      synchronized.profiles[0].sources = synchronized.profiles[0].sources.filter(
-        source => !source.auto_generated || referencedSourceIds.has(source.id)
-      );
       const errors = synchronized.profiles.flatMap(profile =>
         validateProfileRulesV2(profile, synchronized.categorySets)
       );
@@ -321,14 +348,45 @@ export const useCategoryStore = defineStore('categories', {
         profiles: synchronized.profiles,
         categorySets: synchronized.categorySets,
       });
-      this.classes_unsaved_changes = false;
-      this.pending_v2_edits = [];
-      this.pending_v2_sources = null;
-      this.replace_v2_rules_on_save = false;
+      this.pending_v2_edits = this.pending_v2_edits.filter(
+        current => !submittedEdits.some(submitted => _.isEqual(current, submitted))
+      );
+      if (_.isEqual(this.pending_v2_sources, submittedSources)) {
+        this.pending_v2_sources = null;
+      }
+      if (
+        this.replace_v2_rules_on_save === submittedReplaceRules &&
+        _.isEqual(this.classes.map(cleanCategory), submittedClasses)
+      ) {
+        this.replace_v2_rules_on_save = false;
+      }
+      this.classes_unsaved_changes =
+        this.pending_v2_edits.length > 0 ||
+        this.pending_v2_sources !== null ||
+        this.replace_v2_rules_on_save ||
+        !_.isEqual(this.classes.map(cleanCategory), submittedClasses);
     },
     discardPendingV2Changes(this: State) {
       this.pending_v2_edits = [];
       this.pending_v2_sources = null;
+    },
+    discardNewClassDraft(
+      this: State,
+      classId: number,
+      draftId: string,
+      originalName: string[],
+      wasDirty: boolean
+    ) {
+      this.classes = this.classes.filter(category => category.id !== classId);
+      this.pending_v2_edits = this.pending_v2_edits.filter(candidate => {
+        if ('delete' in candidate) return true;
+        return !(candidate.draftId === draftId && _.isEqual(candidate.originalName, originalName));
+      });
+      this.classes_unsaved_changes =
+        wasDirty ||
+        this.pending_v2_edits.length > 0 ||
+        this.pending_v2_sources !== null ||
+        this.replace_v2_rules_on_save;
     },
     queueV2Sources(this: State, sources: SourceDefinitionV2[], baseline: SourceDefinitionV2[]) {
       const changed = mergeSourceDefinitionChanges([], sources, baseline);
@@ -347,6 +405,7 @@ export const useCategoryStore = defineStore('categories', {
     queueV2Edit(this: State, edit: PendingV2Edit) {
       const index = this.pending_v2_edits.findIndex(candidate => {
         if ('delete' in candidate) return false;
+        if (edit.draftId) return candidate.draftId === edit.draftId;
         return edit.categoryId
           ? candidate.categoryId === edit.categoryId
           : _.isEqual(candidate.originalName, edit.originalName);
@@ -376,7 +435,6 @@ export const useCategoryStore = defineStore('categories', {
       this.replace_v2_rules_on_save = true;
     },
     updateClass(this: State, new_class: Category) {
-      console.log('Updating class:', new_class);
       const old_class = this.classes.find((c: Category) => c.id === new_class.id);
       const old_name = old_class.name;
       const parent_depth = old_class.name.length;
@@ -398,7 +456,6 @@ export const useCategoryStore = defineStore('categories', {
           _.isEqual(old_name, c.name.slice(0, parent_depth))
         ) {
           c.name = new_class.name.concat(c.name.slice(parent_depth));
-          console.log('Renamed child:', c.name);
         }
       });
 
@@ -414,16 +471,6 @@ export const useCategoryStore = defineStore('categories', {
       this.classes = this.classes.filter((c: Category) => c.id !== classId);
       this.classes_unsaved_changes = true;
     },
-    appendClassRule(this: State, classId: number, pattern: string) {
-      const cat = this.classes.find((c: Category) => c.id === classId);
-      if (cat.rule.type === 'none' || cat.rule.type === null) {
-        cat.rule.type = 'regex';
-        cat.rule.regex = pattern;
-      } else if (cat.rule.type === 'regex') {
-        cat.rule.regex += '|' + pattern;
-      }
-      this.classes_unsaved_changes = true;
-    },
     restoreDefaultClasses(this: State) {
       this.classes = assignIds(createMissingParents(defaultCategories));
       this.classes_unsaved_changes = true;
@@ -436,6 +483,7 @@ export const useCategoryStore = defineStore('categories', {
       this.pending_v2_sources = null;
       this._rules_v2_dirty_sections = [];
       this.replace_v2_rules_on_save = false;
+      this.editable_category_set_id = null;
     },
   },
 });

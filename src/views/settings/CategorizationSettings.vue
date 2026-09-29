@@ -1,5 +1,23 @@
 <template lang="pug">
 div
+  b-alert.mb-3(variant="danger" :show="settingsStore.rulesV2RecoveryActive")
+    h5 {{ $t('settings.categorization.recoveryTitle') }}
+    p {{ $t('settings.categorization.recoveryHelp') }}
+    ul.small
+      li(v-for="error in settingsStore.invalidRulesV2Diagnostics" :key="error") {{ error }}
+    b-btn.mr-2(size="sm" variant="outline-dark" @click="exportRecoveryDocument")
+      | {{ $t('settings.categorization.recoveryExport') }}
+    label.btn.btn-sm.mr-2.btn-outline-primary(style="margin: 0")
+      | {{ $t('settings.categorization.recoveryImport') }}
+      input(type="file" @change="importCategories" hidden)
+    b-btn(size="sm" variant="danger" @click="resetRecoveryDocument")
+      | {{ $t('settings.categorization.recoveryReset') }}
+
+  b-alert.mb-3(variant="warning" :show="!!settingsStore.rulesV2Conflict")
+    p.mb-2 {{ settingsStore.rulesV2Conflict }}
+    b-btn(size="sm" variant="outline-dark" @click="prepareConflictOverwrite")
+      | {{ $t('settings.categorization.conflictKeepDraft') }}
+
   p.mb-2
     | {{ $t('settings.categorization.rulesHelp') }}
   p
@@ -53,6 +71,25 @@ div
     small.text-muted(v-if="hasUnsavedRules")
       | {{ $t('settings.categorization.editorModeHintUnsaved') }}
 
+  div.my-3.p-3.bg-light.rounded(v-if="categorySets.length > 1 || editorMode === 'advanced'")
+    h5 {{ $t('settings.categorization.categorySetsTitle') }}
+    p.small.text-muted {{ $t('settings.categorization.categorySetsHelp') }}
+    b-form-checkbox-group(
+      :checked="activeCategorySetIds"
+      :options="categorySetOptions"
+      stacked
+      :disabled="hasUnsavedRules || settingsStore.rulesV2RecoveryActive"
+      @input="updateActiveCategorySets"
+    )
+    b-form-group.mt-2.mb-0(:label="$t('settings.categorization.editCategorySet')")
+      b-form-select(
+        size="sm"
+        :value="categoryStore.editable_category_set_id"
+        :options="categorySetOptions"
+        :disabled="hasUnsavedRules"
+        @input="selectEditableCategorySet"
+      )
+
   div.d-flex.align-items-center.flex-wrap.mt-4
     h5.mb-0 {{ $t('settings.categorization.categories') }}
     div.ml-auto
@@ -78,6 +115,7 @@ div
           @click="saveChanges"
           variant="success"
           size="sm"
+          :disabled="settingsStore.rulesV2RecoveryActive"
         )
           | {{ $t('common.save') }}
         b-btn.ml-2(@click="resetChanges", variant="warning" size="sm")
@@ -186,6 +224,11 @@ div
     div(v-if="simplificationLosses.active_time")
       h6 {{ $t('settings.categorization.downgradeActiveTime') }}
       p {{ $t('settings.categorization.downgradeActiveTimeReason') }}
+    div(v-if="simplificationLosses.category_sets.length")
+      h6 {{ $t('settings.categorization.categorySetsTitle') }}
+      p.small.text-muted {{ $t('settings.categorization.downgradeCategorySetsHelp') }}
+      ul
+        li(v-for="setId in simplificationLosses.category_sets" :key="setId") {{ setId }}
     div(v-if="simplificationLosses.sources.length")
       h6 {{ $t('settings.categorization.downgradeSources') }}
       p.small.text-muted {{ $t('settings.categorization.downgradeSourcesHelp') }}
@@ -211,15 +254,19 @@ import { useServerStore } from '~/stores/server';
 import { useSettingsStore } from '~/stores/settings';
 import SourceDefinitionsEditor from '~/components/SourceDefinitionsEditor.vue';
 import RulesValidationAlert from '~/components/RulesValidationAlert.vue';
+import { draftMatchesSubmission } from '~/util/rulesEditor';
 import {
   computeRulesSimplificationLosses,
+  createProfileSourcesDraft,
   hasRulesSimplificationLosses,
   inferRulesEditorMode,
-  initializeProfileSourceDefaults,
+  selectedCategorySet,
   resolveRulesV2Settings,
   type RulesEditorMode,
   type RulesSimplificationLossSet,
   type SourceDefinitionV2,
+  profileSourcesDraftForSave,
+  profileSourcesDraftIsDirty,
   validateProfileRulesV2,
 } from '~/util/rulesV2';
 
@@ -261,6 +308,7 @@ export default {
     loadedPresentationJson: '',
     sourceSaveError: '',
     sourceValidationAttempted: false,
+    sourceSaveInFlight: 0,
     categorySaveError: '',
     previewOpen: false,
     editorModeBusy: false,
@@ -269,6 +317,7 @@ export default {
       categories: [],
       active_time: null,
       sources: [],
+      category_sets: [],
     } as RulesSimplificationLossSet,
   }),
   computed: {
@@ -277,8 +326,26 @@ export default {
     hasUnsavedRules: function () {
       return this.classes_unsaved_changes || this.rules_v2_unsaved_changes;
     },
+    categorySets: function () {
+      return this.settingsStore.rulesV2.category_sets_v2;
+    },
+    activeCategorySetIds: function () {
+      return this.settingsStore.rulesV2.activity_profiles_v2[0]?.category_set_ids ?? [];
+    },
+    categorySetOptions: function () {
+      return this.categorySets.map(set => ({ value: set.id, text: set.id }));
+    },
     advancedAvailable: function () {
-      return this.serverStore.info?.capabilities?.includes('query.categorize_v2.v1') ?? false;
+      const capabilities = this.serverStore.info?.capabilities ?? [];
+      return [
+        'settings.rules_v2.v1',
+        'query.categorize_v2.v1',
+        'query.merge_subwatcher_fields.source_namespace.v1',
+        'query.active_periods_v2.v1',
+        'query.query_bucket_optional_raw.v1',
+        'query.query_period.v1',
+        'query.flood_v2.v1',
+      ].every(capability => capabilities.includes(capability));
     },
     sourceDefinitionsAvailable: function () {
       return (
@@ -314,11 +381,13 @@ export default {
     },
     advancedSourcesDirty: function () {
       const profile = this.settingsStore.rulesV2.activity_profiles_v2[0];
-      const persistedSources = profile?.sources ?? [];
-      return (
-        JSON.stringify(this.advancedSources) !== JSON.stringify(persistedSources) ||
-        this.advancedAppTitleSourceId !== (profile?.app_title_source_id ?? null) ||
-        this.advancedBrowserFocusSourceId !== (profile?.browser_focus_source_id ?? null)
+      return profileSourcesDraftIsDirty(
+        {
+          sources: this.advancedSources,
+          app_title_source_id: this.advancedAppTitleSourceId,
+          browser_focus_source_id: this.advancedBrowserFocusSourceId,
+        },
+        profile
       );
     },
     canonicalSourcesJson: function () {
@@ -347,10 +416,9 @@ export default {
     },
     currentSimplificationLosses: function (): RulesSimplificationLossSet {
       const rules = this.settingsStore.rulesV2;
-      return computeRulesSimplificationLosses(
-        rules.activity_profiles_v2[0],
-        rules.category_sets_v2[0]
-      );
+      const profile = rules.activity_profiles_v2[0];
+      const categorySet = selectedCategorySet(profile, rules.category_sets_v2);
+      return computeRulesSimplificationLosses(profile, categorySet ?? rules.category_sets_v2[0]);
     },
     canReturnToSimpleWithoutChanges: function () {
       return !hasRulesSimplificationLosses(this.currentSimplificationLosses);
@@ -384,6 +452,15 @@ export default {
       if (losses.active_time) {
         lines.push(String(this.$t('settings.categorization.editorModeHintActiveTime')));
       }
+      if (losses.category_sets.length) {
+        lines.push(
+          String(
+            this.$t('settings.categorization.editorModeHintCategorySets', {
+              sets: losses.category_sets.join(', '),
+            })
+          )
+        );
+      }
       if (losses.sources.length) {
         const shownSources = losses.sources.slice(0, 2).map(source => source.label);
         const remaining = losses.sources.length - shownSources.length;
@@ -409,6 +486,7 @@ export default {
       this.categoryStore.setRulesV2DraftDirty('sources', value);
     },
     canonicalSourcesJson(value: string) {
+      if (this.sourceSaveInFlight > 0) return;
       if (
         JSON.stringify({
           sources: this.advancedSources,
@@ -436,7 +514,7 @@ export default {
       app_title_source_id: this.advancedAppTitleSourceId,
       browser_focus_source_id: this.advancedBrowserFocusSourceId,
     });
-    this.categoryStore.load();
+    this.categoryStore.load(undefined, profile?.category_set_ids[0]);
     window.addEventListener('beforeunload', this.beforeUnload);
 
     if (this.$route.query.builder === 'open') {
@@ -452,8 +530,50 @@ export default {
   beforeDestroy() {
     window.removeEventListener('beforeunload', this.beforeUnload);
     this.categoryStore.setRulesV2DraftDirty('sources', false);
+    this.categoryStore.load(this.settingsStore.classes);
   },
   methods: {
+    reloadEditableCategories(preferActive = false) {
+      const rules = this.settingsStore.rulesV2;
+      const current = this.categoryStore.editable_category_set_id;
+      const selectedId =
+        (!preferActive && rules.category_sets_v2.some(set => set.id === current)
+          ? current
+          : null) ??
+        rules.activity_profiles_v2[0]?.category_set_ids[0] ??
+        rules.category_sets_v2[0]?.id;
+      if (selectedId) this.categoryStore.load(undefined, selectedId);
+    },
+    async updateActiveCategorySets(categorySetIds: string[]) {
+      this.categorySaveError = '';
+      try {
+        await this.settingsStore.setActiveCategorySetsV2(categorySetIds);
+        const editableId = this.categoryStore.editable_category_set_id;
+        if (!editableId || !categorySetIds.includes(editableId)) {
+          this.categoryStore.selectCategorySet(categorySetIds[0]);
+        }
+      } catch (error) {
+        this.categorySaveError = error instanceof Error ? error.message : String(error);
+      }
+    },
+    selectEditableCategorySet(categorySetId: string) {
+      if (this.hasUnsavedRules) return;
+      this.categoryStore.selectCategorySet(categorySetId);
+    },
+    syncAdvancedDraftFromCanonical() {
+      const profile = this.settingsStore.rulesV2.activity_profiles_v2[0];
+      const draft = createProfileSourcesDraft(profile);
+      this.advancedSources = draft.sources;
+      this.advancedAppTitleSourceId = draft.app_title_source_id;
+      this.advancedBrowserFocusSourceId = draft.browser_focus_source_id;
+      this.loadedSourcesJson = JSON.stringify(this.advancedSources);
+      this.loadedPresentationJson = JSON.stringify({
+        sources: this.advancedSources,
+        app_title_source_id: this.advancedAppTitleSourceId,
+        browser_focus_source_id: this.advancedBrowserFocusSourceId,
+      });
+      this.sourceValidationAttempted = false;
+    },
     downgradeSourceLabel(source: Pick<SourceDefinitionV2, 'label'>) {
       return this.$t('settings.categorization.downgradeSourceItem', {
         label: source.label,
@@ -490,7 +610,8 @@ export default {
       this.editorModeBusy = true;
       try {
         await this.settingsStore.simplifyRulesV2();
-        this.categoryStore.load();
+        this.reloadEditableCategories(true);
+        this.syncAdvancedDraftFromCanonical();
       } catch (error) {
         this.categorySaveError = error instanceof Error ? error.message : String(error);
       } finally {
@@ -502,10 +623,9 @@ export default {
       this.editorModeBusy = true;
       try {
         await this.settingsStore.simplifyRulesV2();
-        this.categoryStore.load();
+        this.reloadEditableCategories(true);
         this.categoryStore.discardPendingV2Changes();
-        this.advancedSources = [];
-        this.loadedSourcesJson = '[]';
+        this.syncAdvancedDraftFromCanonical();
         this.sourcesOpen = false;
         this.previewOpen = false;
         this.$refs.simplifyModal.hide();
@@ -531,43 +651,51 @@ export default {
         return;
       }
       try {
+        const persistedProfile = this.settingsStore.rulesV2.activity_profiles_v2[0];
+        const submittedSourceDraft = JSON.stringify({
+          sources: this.advancedSources,
+          app_title_source_id: this.advancedAppTitleSourceId,
+          browser_focus_source_id: this.advancedBrowserFocusSourceId,
+        });
+        const sourceSnapshot = profileSourcesDraftForSave(
+          JSON.parse(submittedSourceDraft),
+          persistedProfile
+        );
+        this.sourceSaveInFlight++;
         await this.categoryStore.save(
-          this.advancedSourcesDirty ? this.advancedSources : undefined,
-          this.advancedSourcesDirty
+          sourceSnapshot,
+          sourceSnapshot
             ? {
                 app_title_source_id: this.advancedAppTitleSourceId ?? undefined,
                 browser_focus_source_id: this.advancedBrowserFocusSourceId ?? undefined,
               }
             : undefined
         );
-        const profile = this.settingsStore.rulesV2.activity_profiles_v2[0];
-        this.advancedSources = JSON.parse(JSON.stringify(profile?.sources ?? []));
-        this.advancedAppTitleSourceId = profile?.app_title_source_id ?? null;
-        this.advancedBrowserFocusSourceId = profile?.browser_focus_source_id ?? null;
-        this.loadedSourcesJson = JSON.stringify(this.advancedSources);
-        this.loadedPresentationJson = JSON.stringify({
-          sources: this.advancedSources,
-          app_title_source_id: this.advancedAppTitleSourceId,
-          browser_focus_source_id: this.advancedBrowserFocusSourceId,
-        });
-        this.sourceValidationAttempted = false;
+        if (
+          draftMatchesSubmission(
+            {
+              sources: this.advancedSources,
+              app_title_source_id: this.advancedAppTitleSourceId,
+              browser_focus_source_id: this.advancedBrowserFocusSourceId,
+            },
+            submittedSourceDraft
+          )
+        ) {
+          this.syncAdvancedDraftFromCanonical();
+        } else {
+          const storedProfile = this.settingsStore.rulesV2.activity_profiles_v2[0];
+          this.loadedSourcesJson = JSON.stringify(storedProfile?.sources ?? []);
+          this.loadedPresentationJson = this.canonicalSourcesJson;
+        }
       } catch (error) {
         this.categorySaveError = error instanceof Error ? error.message : String(error);
+      } finally {
+        if (this.sourceSaveInFlight > 0) this.sourceSaveInFlight--;
       }
     },
     resetChanges: async function () {
-      await this.categoryStore.load();
-      const profile = this.settingsStore.rulesV2.activity_profiles_v2[0];
-      this.advancedSources = JSON.parse(JSON.stringify(profile?.sources ?? []));
-      this.advancedAppTitleSourceId = profile?.app_title_source_id ?? null;
-      this.advancedBrowserFocusSourceId = profile?.browser_focus_source_id ?? null;
-      this.loadedSourcesJson = JSON.stringify(this.advancedSources);
-      this.loadedPresentationJson = JSON.stringify({
-        sources: this.advancedSources,
-        app_title_source_id: this.advancedAppTitleSourceId,
-        browser_focus_source_id: this.advancedBrowserFocusSourceId,
-      });
-      this.sourceValidationAttempted = false;
+      this.reloadEditableCategories();
+      this.syncAdvancedDraftFromCanonical();
     },
     restoreDefaultClasses: async function () {
       if (
@@ -614,27 +742,32 @@ export default {
 
         if (
           Array.isArray(import_obj.activity_profiles_v2) &&
-          import_obj.activity_profiles_v2.length === 1 &&
+          import_obj.activity_profiles_v2.length > 0 &&
           Array.isArray(import_obj.category_sets_v2) &&
           import_obj.category_sets_v2.length > 0
         ) {
           const imported = resolveRulesV2Settings({
-            activity_profiles_v2: initializeProfileSourceDefaults(import_obj.activity_profiles_v2),
+            activity_profiles_v2: import_obj.activity_profiles_v2,
             category_sets_v2: import_obj.category_sets_v2,
             classes: this.categoryStore.classes_clean,
             always_active_pattern: this.settingsStore.always_active_pattern,
+            // A v2 import is an explicit canonical replacement, not a
+            // predecessor document that needs source/default migration.
+            authoritative: true,
           });
           await this.settingsStore.saveCanonicalRulesV2({
             profiles: imported.activity_profiles_v2,
             categorySets: imported.category_sets_v2,
+            recoveryReplacement: this.settingsStore.rulesV2RecoveryActive,
             extra: {
               rules_editor_mode: inferRulesEditorMode(
                 imported.activity_profiles_v2[0],
-                imported.category_sets_v2[0]
+                selectedCategorySet(imported.activity_profiles_v2[0], imported.category_sets_v2) ??
+                  imported.category_sets_v2[0]
               ),
             },
           });
-          this.categoryStore.load();
+          this.reloadEditableCategories(true);
           this.advancedSources = JSON.parse(
             JSON.stringify(imported.activity_profiles_v2[0].sources)
           );
@@ -651,6 +784,34 @@ export default {
         this.categorySaveError = error instanceof Error ? error.message : String(error);
       } finally {
         elem.target.value = '';
+      }
+    },
+    prepareConflictOverwrite: async function () {
+      const warning = String(this.$t('settings.categorization.conflictKeepDraftConfirm'));
+      if (!confirm(warning)) return;
+      try {
+        await this.settingsStore.rebaseRulesV2DraftForOverwrite();
+      } catch (error) {
+        this.categorySaveError = error instanceof Error ? error.message : String(error);
+      }
+    },
+    exportRecoveryDocument: async function () {
+      const raw = this.settingsStore.rawRulesV2Document;
+      const text = JSON.stringify(
+        raw ?? { diagnostics: this.settingsStore.invalidRulesV2Diagnostics },
+        null,
+        2
+      );
+      await downloadFile('aw-rules-v2-recovery.json', text, 'application/json');
+    },
+    resetRecoveryDocument: async function () {
+      if (!confirm(String(this.$t('settings.categorization.recoveryResetConfirm')))) return;
+      try {
+        await this.settingsStore.replaceRulesV2WithDefaults();
+        this.reloadEditableCategories(true);
+        this.syncAdvancedDraftFromCanonical();
+      } catch (error) {
+        this.categorySaveError = error instanceof Error ? error.message : String(error);
       }
     },
     beforeUnload: function (e) {

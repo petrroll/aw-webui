@@ -2,27 +2,95 @@ import {
   BUILTIN_WINDOW_SOURCE_ID,
   applyRulesSimplification,
   categorySetToLegacyClasses,
-  compileProfileQueryOptions,
   computeRulesSimplificationLosses,
+  createProfileSourcesDraft,
   defaultBuiltinBrowserSource,
   defaultBuiltinSources,
   defaultBuiltinStopwatchSource,
   defaultBuiltinWindowSource,
-  deleteCategoryRuleV2,
+  effectiveRuleSelector,
   inferRulesEditorMode,
   initializeProfileSourceDefaults,
   isLegacyCompatibleRuleV2,
   legacyRuleToV2,
   migrateLegacySettings,
+  profileSourcesDraftForSave,
+  profileSourcesDraftIsDirty,
   resolveRulesV2Settings,
-  synchronizeCategoryTreeV2,
-  updateCategoryRuleV2,
+  selectedCategorySet,
   validateActivityProfile,
   validateCategorySet,
   validateProfileRulesV2,
+  validateRuleExpression,
   v2RuleToLegacy,
 } from '~/util/rulesV2';
 import type { RuleExpressionV2 } from '~/util/rulesV2';
+import {
+  compileActivityQueryV2,
+  compileProfileQueryOptions,
+  semanticRuleExpression,
+} from '~/util/rulesV2Compilation';
+import {
+  deleteCategoryRuleV2,
+  synchronizeCategoryTreeV2,
+  updateCategoryRuleV2,
+} from '~/util/rulesV2Editor';
+
+describe('rules v2 execution specs', () => {
+  test('resolves selector aliases in fields, field, select_keys order', () => {
+    expect(
+      effectiveRuleSelector({ fields: ['url'], field: 'title', select_keys: ['app'] })
+    ).toEqual(['url']);
+    expect(effectiveRuleSelector({ field: 'title', select_keys: ['app'] })).toEqual(['title']);
+    expect(effectiveRuleSelector({ select_keys: ['app', 'title'] })).toEqual(['app', 'title']);
+  });
+
+  test('drops irrelevant expression metadata from generated Query2 specs', () => {
+    const expression = {
+      type: 'regex',
+      source: 'builtin_window',
+      field: 'title',
+      regex: 'Work',
+      rules: '\\',
+      presentation: { color: 'blue' },
+    } as unknown as RuleExpressionV2;
+    expect(semanticRuleExpression(expression)).toEqual({
+      type: 'regex',
+      source: 'builtin_window',
+      field: 'title',
+      regex: 'Work',
+    });
+  });
+
+  test('rejects both canonical selector fields while low-level projection keeps precedence', () => {
+    const expression: RuleExpressionV2 = {
+      type: 'regex',
+      regex: 'Work',
+      fields: ['app'],
+      field: 'title',
+    };
+    expect(validateRuleExpression(expression)).toContain(
+      'rule may not define both field and fields'
+    );
+    expect(semanticRuleExpression(expression)).toEqual({
+      type: 'regex',
+      regex: 'Work',
+      fields: ['app'],
+    });
+  });
+
+  test('keeps only the selector with evaluator precedence', () => {
+    expect(
+      semanticRuleExpression({
+        type: 'regex',
+        regex: 'Work',
+        fields: ['app'],
+        field: 'title',
+        select_keys: ['url'],
+      })
+    ).toEqual({ type: 'regex', regex: 'Work', fields: ['app'] });
+  });
+});
 
 describe('rules v2 migration', () => {
   test('migrates legacy rules with zero weight and field compatibility', () => {
@@ -62,7 +130,7 @@ describe('rules v2 migration', () => {
     });
     expect(migrated.activity_profiles_v2[0].sources).toEqual(defaultBuiltinSources());
     expect(migrated.activity_profiles_v2[0]).toMatchObject({
-      source_defaults_version: 3,
+      source_defaults_version: 4,
       app_title_source_id: BUILTIN_WINDOW_SOURCE_ID,
       browser_focus_source_id: BUILTIN_WINDOW_SOURCE_ID,
     });
@@ -94,7 +162,7 @@ describe('rules v2 migration', () => {
     };
 
     expect(initializeProfileSourceDefaults([profile])[0]).toMatchObject({
-      source_defaults_version: 3,
+      source_defaults_version: 4,
       sources: defaultBuiltinSources(),
       app_title_source_id: BUILTIN_WINDOW_SOURCE_ID,
       browser_focus_source_id: BUILTIN_WINDOW_SOURCE_ID,
@@ -107,7 +175,7 @@ describe('rules v2 migration', () => {
         },
       ])[0]
     ).toMatchObject({
-      source_defaults_version: 3,
+      source_defaults_version: 4,
       sources: [
         defaultBuiltinWindowSource(false),
         defaultBuiltinBrowserSource(),
@@ -118,7 +186,7 @@ describe('rules v2 migration', () => {
       initializeProfileSourceDefaults([
         {
           ...profile,
-          source_defaults_version: 3,
+          source_defaults_version: 4,
         },
       ])[0].sources
     ).toEqual([]);
@@ -144,10 +212,10 @@ describe('rules v2 migration', () => {
     const migrated = initializeProfileSourceDefaults([profile])[0];
 
     expect(migrated.sources[0]).not.toHaveProperty('keeps_active');
-    expect(migrated.source_defaults_version).toBe(3);
+    expect(migrated.source_defaults_version).toBe(4);
   });
 
-  test('preserves persisted sets when creating a default profile', () => {
+  test('rejects category sets without the matching pre-atomic profile document', () => {
     const persistedSets = [
       {
         schema_version: 2 as const,
@@ -160,42 +228,36 @@ describe('rules v2 migration', () => {
         categories: [],
       },
     ];
-    const resolved = resolveRulesV2Settings({
-      activity_profiles_v2: null,
-      category_sets_v2: persistedSets,
-      classes: [{ name: ['Legacy'], rule: { type: 'none' } }],
-    });
-
-    expect(resolved.category_sets_v2).toEqual(persistedSets);
-    expect(resolved.activity_profiles_v2[0].id).toBe('default');
-    expect(resolved.activity_profiles_v2[0].category_set_ids).toEqual(['advanced']);
-    expect(resolved.migrated).toBe(true);
+    expect(() =>
+      resolveRulesV2Settings({
+        activity_profiles_v2: null,
+        category_sets_v2: persistedSets,
+        classes: [{ name: ['Legacy'], rule: { type: 'none' } }],
+      })
+    ).toThrow('activity_profiles_v2 must be an array');
   });
 
-  test('resolves persisted profiles without sets to the migrated default set', () => {
-    const resolved = resolveRulesV2Settings({
-      activity_profiles_v2: [
-        {
-          schema_version: 2,
-          id: 'default',
-          category_set_ids: ['work', 'personal'],
-          sources: [],
-          active_time: {
-            type: 'legacy',
-            use_afk: true,
-            include_audible: true,
-            always_active_pattern: '',
+  test('rejects profiles without the matching pre-atomic category-set document', () => {
+    expect(() =>
+      resolveRulesV2Settings({
+        activity_profiles_v2: [
+          {
+            schema_version: 2,
+            id: 'default',
+            category_set_ids: ['work', 'personal'],
+            sources: [],
+            active_time: {
+              type: 'legacy',
+              use_afk: true,
+              include_audible: true,
+              always_active_pattern: '',
+            },
           },
-        },
-      ],
-      category_sets_v2: null,
-      classes: [{ name: ['Legacy'], rule: { type: 'none' } }],
-    });
-
-    expect(resolved.category_sets_v2).toHaveLength(1);
-    expect(resolved.category_sets_v2[0].id).toBe('default');
-    expect(resolved.category_sets_v2[0].categories[0].name).toEqual(['Legacy']);
-    expect(resolved.activity_profiles_v2[0].category_set_ids).toEqual(['default']);
+        ],
+        category_sets_v2: null,
+        classes: [{ name: ['Legacy'], rule: { type: 'none' } }],
+      })
+    ).toThrow('category_sets_v2 must be an array');
   });
 
   test('normalizes the selected profile and set without dropping the others', () => {
@@ -717,7 +779,7 @@ describe('rules v2 validation', () => {
       ]
     );
 
-    expect(errors).toContain('category meeting references unknown source meeting');
+    expect(errors).toContain('category default/meeting references unknown source meeting');
   });
 
   test('reports invalid regexes and non-integer priorities', () => {
@@ -734,8 +796,49 @@ describe('rules v2 validation', () => {
       ],
     });
 
-    expect(errors).toContain('categories[0].priority must be an integer');
+    expect(errors).toContain(
+      'categories[0].priority must be an integer between -1000000 and 1000000'
+    );
     expect(errors).toContain('categories[0].rule.regex is invalid');
+  });
+
+  test('enforces the shared ranking integer domain', () => {
+    const errors = validateCategorySet({
+      schema_version: 2,
+      id: 'default',
+      priority: 1_000_001,
+      categories: [
+        {
+          id: 'ranked',
+          name: ['Ranked'],
+          priority: -1_000_001,
+          rule: { type: 'regex', regex: 'x', weight: true as unknown as number },
+        },
+      ],
+    });
+
+    expect(errors).toEqual(
+      expect.arrayContaining([
+        'category set priority must be an integer between -1000000 and 1000000',
+        'categories[0].priority must be an integer between -1000000 and 1000000',
+        'categories[0].rule.weight must be an integer between -1000000 and 1000000',
+      ])
+    );
+    expect(
+      validateCategorySet({
+        schema_version: 2,
+        id: 'bounds',
+        priority: -1_000_000,
+        categories: [
+          {
+            id: 'ranked',
+            name: ['Ranked'],
+            priority: 1_000_000,
+            rule: { type: 'regex', regex: 'x', weight: -1_000_000 },
+          },
+        ],
+      })
+    ).toEqual([]);
   });
 
   test('rejects a simple UI marker on an incompatible category', () => {
@@ -804,6 +907,31 @@ describe('rules v2 validation', () => {
       ],
     };
 
+    test('resolves editor mode from the selected set rather than storage order', () => {
+      const simpleSet = {
+        ...categorySet,
+        id: 'inactive',
+        categories: [categorySet.categories[0]],
+      };
+      const selectedProfile = {
+        ...profile,
+        category_set_ids: ['default'],
+        sources: defaultBuiltinSources(),
+        app_title_source_id: BUILTIN_WINDOW_SOURCE_ID,
+        browser_focus_source_id: BUILTIN_WINDOW_SOURCE_ID,
+        active_time: {
+          type: 'legacy' as const,
+          use_afk: true,
+          include_audible: true,
+          always_active_pattern: '',
+        },
+      };
+      const selected = selectedCategorySet(selectedProfile, [simpleSet, categorySet]);
+      expect(selected?.id).toBe('default');
+      if (!selected) throw new Error('The selected category set is unavailable');
+      expect(inferRulesEditorMode(selectedProfile, selected)).toBe('advanced');
+    });
+
     test('infers advanced mode for non-simple canonical configuration', () => {
       expect(inferRulesEditorMode(profile, categorySet)).toBe('advanced');
       const simpleProfile = {
@@ -864,6 +992,7 @@ describe('rules v2 validation', () => {
           field: 'subject',
         },
         sources: [{ id: 'calendar', label: 'Work calendar' }],
+        category_sets: [],
       });
     });
 
@@ -979,7 +1108,7 @@ describe('rules v2 validation', () => {
     expect(profileErrors).toContain('active_time.rule.rules must contain at least one rule');
   });
 
-  test('rejects selecting multiple category sets while preserving inactive sets', () => {
+  test('accepts selecting multiple category sets while preserving inactive sets', () => {
     const profile = {
       schema_version: 2 as const,
       id: 'default',
@@ -997,9 +1126,7 @@ describe('rules v2 validation', () => {
       { schema_version: 2 as const, id: 'secondary', categories: [] },
     ];
 
-    expect(validateActivityProfile(profile, new Set(['primary', 'secondary']))).toContain(
-      'activity profile must select exactly one category set'
-    );
+    expect(validateActivityProfile(profile, new Set(['primary', 'secondary']))).toEqual([]);
     expect(validateProfileRulesV2(profile, sets)).not.toContain(
       'exactly one category set must be configured'
     );
@@ -1032,7 +1159,148 @@ describe('rules v2 validation', () => {
     expect(errors).toContain('sources[0].fields must be non-empty');
   });
 
-  test('rejects an empty active-time expression', () => {
+  test.each([
+    [
+      'creates_activity string',
+      (source: any) => (source.creates_activity = 'false'),
+      'creates_activity must be boolean',
+    ],
+    [
+      'keeps_active string',
+      (source: any) => (source.keeps_active = 'true'),
+      'keeps_active must be boolean',
+    ],
+    [
+      'missing bucket_ids',
+      (source: any) => delete source.bucket_ids,
+      'bucket_ids must be a string array',
+    ],
+    ['missing fields', (source: any) => delete source.fields, 'fields must be a string array'],
+    ['invalid builtin', (source: any) => (source.builtin = 'bogus'), 'builtin is unsupported'],
+    ['invalid builtin id', (source: any) => (source.builtin = 'window'), 'builtin is unsupported'],
+    ['invalid scope', (source: any) => (source.scope = 'machine'), 'scope must be host or global'],
+    [
+      'invalid policy',
+      (source: any) => (source.interval_policy = 'approximate'),
+      'interval_policy must be exact or heartbeat',
+    ],
+    [
+      'invalid field type',
+      (source: any) => (source.field_types = { value: 'number' }),
+      'field_types values must be string or scalar',
+    ],
+    [
+      'global owner',
+      (source: any) => (source.host = 'host'),
+      'global scope cannot define host ownership',
+    ],
+    [
+      'host without owner',
+      (source: any) => (source.scope = 'host'),
+      'host scope requires complete ownership',
+    ],
+  ])('validates the complete source boundary: %s', (_name, mutate, expected) => {
+    const source: any = {
+      id: 'source_0',
+      label: 'Source 0',
+      bucket_ids: ['bucket-0'],
+      scope: 'global',
+      fields: ['value'],
+    };
+    mutate(source);
+    const errors = validateActivityProfile(
+      {
+        schema_version: 2,
+        id: 'default',
+        category_set_ids: ['default'],
+        sources: [source],
+        active_time: { type: 'expression', rule: { type: 'none' } },
+      } as any,
+      new Set(['default'])
+    );
+    expect(errors.join('; ')).toContain(expected);
+  });
+
+  test('accepts exactly 128 source definitions with optional behavior defaults', () => {
+    const sources = Array.from({ length: 128 }, (_, index) => ({
+      id: `source_${index}`,
+      label: `Source ${index}`,
+      bucket_ids: [`bucket-${index}`],
+      scope: 'global' as const,
+      fields: ['value'],
+    }));
+    const profile = {
+      schema_version: 2 as const,
+      id: 'default',
+      category_set_ids: ['default'],
+      sources,
+      active_time: { type: 'expression' as const, rule: { type: 'none' as const } },
+    };
+    expect(validateActivityProfile(profile, new Set(['default']))).toEqual([]);
+    expect(
+      validateActivityProfile(
+        {
+          ...profile,
+          sources: [...sources, { ...sources[0], id: 'source_128', bucket_ids: ['bucket-128'] }],
+        },
+        new Set(['default'])
+      ).join('; ')
+    ).toContain('sources exceed maximum count of 128');
+  });
+
+  test.each([
+    [
+      'missing sources',
+      (settingsDocument: any) => delete settingsDocument.activity_profiles_v2[0].sources,
+      'activity_profiles_v2[0].sources must be an array',
+    ],
+    [
+      'missing active_time',
+      (settingsDocument: any) => delete settingsDocument.activity_profiles_v2[0].active_time,
+      'activity_profiles_v2[0].active_time must be an object',
+    ],
+    [
+      'null category set',
+      (settingsDocument: any) => (settingsDocument.category_sets_v2[0] = null),
+      'category_sets_v2[0]',
+    ],
+    [
+      'non-array requires',
+      (settingsDocument: any) =>
+        (settingsDocument.category_sets_v2[0].categories[0].requires = { bad: true }),
+      'category_sets_v2[0].categories[0].requires must be an array',
+    ],
+  ])('reports field paths without TypeErrors for %s', (_name, mutate, expected) => {
+    const settingsDocument: any = {
+      activity_profiles_v2: [
+        {
+          schema_version: 2,
+          id: 'default',
+          category_set_ids: ['default'],
+          sources: [],
+          active_time: { type: 'expression', rule: { type: 'none' } },
+        },
+      ],
+      category_sets_v2: [
+        {
+          schema_version: 2,
+          id: 'default',
+          categories: [{ id: 'one', name: ['One'], rule: { type: 'none' } }],
+        },
+      ],
+    };
+    mutate(settingsDocument);
+    expect(() => resolveRulesV2Settings({ ...settingsDocument, authoritative: true })).toThrow(
+      expected
+    );
+    try {
+      resolveRulesV2Settings({ ...settingsDocument, authoritative: true });
+    } catch (error) {
+      expect(String(error)).not.toMatch(/TypeError|Cannot read|is not iterable/);
+    }
+  });
+
+  test('accepts an explicit none active-time expression', () => {
     const errors = validateActivityProfile(
       {
         schema_version: 2,
@@ -1047,7 +1315,7 @@ describe('rules v2 validation', () => {
       new Set(['default'])
     );
 
-    expect(errors).toContain('active_time.rule must contain at least one matching condition');
+    expect(errors).toEqual([]);
   });
 
   test('rejects incomplete bucket host mappings', () => {
@@ -1320,9 +1588,7 @@ describe('v2 profile compiler', () => {
         {
           schema_version: 2,
           id: 'default',
-          categories: [
-            { id: 'work', name: ['Work'], rule: { type: 'regex', regex: 'Work' } },
-          ],
+          categories: [{ id: 'work', name: ['Work'], rule: { type: 'regex', regex: 'Work' } }],
         },
       ],
       capabilities
@@ -1374,9 +1640,7 @@ describe('v2 profile compiler', () => {
     // A fully explicit (meeting/presence-only) profile has no window privilege: the
     // window contributes no activity and only the configured source is emitted.
     expect(options.legacy_window_mode).toBe('none');
-    expect(options.activity_coverage_sources.map(source => source.source_id)).toEqual([
-      'presence',
-    ]);
+    expect(options.activity_coverage_sources.map(source => source.source_id)).toEqual(['presence']);
     expect(
       options.activity_coverage_sources.some(source => source.source_id === 'builtin_window')
     ).toBe(false);
@@ -1390,6 +1654,7 @@ describe('v2 profile compiler', () => {
         id: 'default',
         category_set_ids: ['default'],
         sources: [
+          defaultBuiltinWindowSource(false),
           {
             id: 'presence',
             label: 'Presence',
@@ -1574,5 +1839,257 @@ describe('v2 profile compiler', () => {
       'desktop-high',
     ]);
     expect(options.context_sources).toEqual([]);
+  });
+
+  test('a simplified profile resyncs the Advanced source draft without phantom changes', () => {
+    const simplified = applyRulesSimplification({
+      profile: {
+        schema_version: 2,
+        id: 'default',
+        category_set_ids: ['default'],
+        sources: [],
+        active_time: { type: 'expression', rule: { type: 'none' } },
+      },
+      categorySet: { schema_version: 2, id: 'default', categories: [] },
+      always_active_pattern: '',
+    });
+    const profile = simplified.activity_profiles_v2[0];
+    const draft = createProfileSourcesDraft(profile);
+
+    expect(draft.sources).toEqual(defaultBuiltinSources());
+    expect(profileSourcesDraftIsDirty(draft, profile)).toBe(false);
+    // This is the snapshot passed by CategorizationSettings to categoryStore.save;
+    // undefined means a later category Save cannot overwrite the restored sources.
+    expect(profileSourcesDraftForSave(draft, profile)).toBeUndefined();
+    expect(profileSourcesDraftForSave({ ...draft, sources: [] }, profile)).toEqual([]);
+  });
+
+  test('validation rejects unsourced categories after the window source is removed', () => {
+    const profile = {
+      schema_version: 2 as const,
+      id: 'default',
+      category_set_ids: ['default'],
+      sources: [
+        {
+          id: 'presence',
+          label: 'Presence',
+          bucket_ids: ['presence'],
+          scope: 'global' as const,
+          fields: ['state'],
+          creates_activity: true,
+        },
+      ],
+      active_time: {
+        type: 'expression' as const,
+        rule: { type: 'regex' as const, source: 'presence', field: 'state', regex: 'active' },
+      },
+    };
+    const categorySets = [
+      {
+        schema_version: 2 as const,
+        id: 'default',
+        categories: [
+          {
+            id: 'work',
+            name: ['Work'],
+            rule: { type: 'regex' as const, regex: 'Code' },
+          },
+        ],
+      },
+    ];
+
+    expect(validateProfileRulesV2(profile, categorySets)).toContain(
+      'category set default: unsourced category rules require the App & window source'
+    );
+    categorySets[0].categories[0].rule = {
+      type: 'regex',
+      source: 'presence',
+      field: 'state',
+      regex: 'active',
+    } as any;
+    expect(validateProfileRulesV2(profile, categorySets)).toEqual([]);
+  });
+
+  test('flattens multiple selected sets with collision-free ids and local prerequisites', () => {
+    const profile: ActivityProfileV2 = {
+      schema_version: 2,
+      id: 'default',
+      category_set_ids: ['💼', 'other'],
+      sources: [defaultBuiltinWindowSource()],
+      active_time: { type: 'expression', rule: { type: 'none' } },
+    };
+    const categorySets: CategorySetV2[] = [
+      {
+        schema_version: 2,
+        id: '💼',
+        categories: [
+          { id: 'base', name: ['Work'], rule: { type: 'regex', regex: 'work' } },
+          {
+            id: 'child',
+            name: ['Work', 'Code'],
+            rule: { type: 'regex', regex: 'code' },
+            requires: ['base'],
+          },
+        ],
+      },
+      {
+        schema_version: 2,
+        id: 'other',
+        priority: 9,
+        categories: [{ id: 'base', name: ['Other'], rule: { type: 'regex', regex: 'other' } }],
+      },
+    ];
+
+    const compiled = compileActivityQueryV2(profile, categorySets, [
+      'query.categorize_v2.v1',
+      'query.merge_subwatcher_fields.source_namespace.v1',
+      'query.active_periods_v2.v1',
+    ]);
+
+    expect(compiled.category_specs.map(rule => rule.id)).toEqual([
+      'set:4:💼:rule:base',
+      'set:4:💼:rule:child',
+      'set:5:other:rule:base',
+    ]);
+    expect(compiled.category_specs[1].requires).toEqual(['set:4:💼:rule:base']);
+    expect(compiled.category_specs.map(rule => rule.set_priority)).toEqual([2, 2, 9]);
+  });
+
+  test('authoritative duplicate category-set ids are rejected during load validation', () => {
+    expect(() =>
+      resolveRulesV2Settings({
+        authoritative: true,
+        activity_profiles_v2: [
+          {
+            schema_version: 2,
+            id: 'default',
+            category_set_ids: ['duplicate'],
+            sources: [],
+            active_time: { type: 'expression', rule: { type: 'none' } },
+          },
+        ],
+        category_sets_v2: [
+          { schema_version: 2, id: 'duplicate', categories: [] },
+          { schema_version: 2, id: 'duplicate', categories: [] },
+        ],
+        classes: [],
+      })
+    ).toThrow('category_sets_v2[1].id is duplicated');
+  });
+
+  test('authoritative forward profile versions are rejected before normalization', () => {
+    expect(() =>
+      resolveRulesV2Settings({
+        authoritative: true,
+        activity_profiles_v2: [
+          {
+            schema_version: 99 as any,
+            id: 'future',
+            category_set_ids: ['default'],
+            sources: [],
+            active_time: { type: 'expression', rule: { type: 'none' } },
+          },
+        ],
+        category_sets_v2: [{ schema_version: 2, id: 'default', categories: [] }],
+        classes: [],
+      })
+    ).toThrow('activity_profiles_v2[0].schema_version must be 2');
+  });
+
+  test('selected category sets share one executable category budget', () => {
+    const categories = (prefix: string) =>
+      Array.from({ length: 501 }, (_, index) => ({
+        id: `${prefix}-${index}`,
+        name: [prefix, String(index)],
+        rule: { type: 'none' as const },
+      }));
+    const profile = {
+      schema_version: 2 as const,
+      id: 'default',
+      category_set_ids: ['one', 'two'],
+      sources: [],
+      active_time: { type: 'expression' as const, rule: { type: 'none' as const } },
+    };
+    const errors = validateProfileRulesV2(profile, [
+      { schema_version: 2, id: 'one', categories: categories('one') },
+      { schema_version: 2, id: 'two', categories: categories('two') },
+    ]);
+    expect(errors.join(' ')).toContain('select 1002 category rules');
+  });
+
+  test('selected category sets share one executable expression-node budget', () => {
+    const categories = (prefix: string) => [
+      {
+        id: `${prefix}-root`,
+        name: [prefix],
+        rule: {
+          type: 'any' as const,
+          rules: Array.from({ length: 2048 }, () => ({
+            type: 'regex' as const,
+            regex: '.',
+          })),
+        },
+      },
+    ];
+    const errors = validateProfileRulesV2(
+      {
+        schema_version: 2,
+        id: 'default',
+        category_set_ids: ['one', 'two'],
+        sources: [defaultBuiltinWindowSource()],
+        active_time: { type: 'expression', rule: { type: 'none' } },
+      },
+      [
+        { schema_version: 2, id: 'one', categories: categories('one') },
+        { schema_version: 2, id: 'two', categories: categories('two') },
+      ]
+    );
+    expect(errors.join(' ')).toContain('maximum node count of 4096');
+  });
+
+  test('shape diagnostics identify category_set_ids and category names', () => {
+    const validSet = { schema_version: 2 as const, id: 'default', categories: [] };
+    expect(
+      validateProfileRulesV2(
+        {
+          schema_version: 2,
+          id: 'broken',
+          sources: [],
+          active_time: { type: 'expression', rule: { type: 'none' } },
+        } as any,
+        [validSet]
+      ).join(' ')
+    ).toContain('category_set_ids must be a non-empty string array');
+    expect(
+      validateCategorySet({
+        schema_version: 2,
+        id: 'default',
+        categories: [{ id: 'nameless', rule: { type: 'none' } }],
+      } as any).join(' ')
+    ).toContain('categories[0].name must contain non-empty string segments');
+  });
+
+  test('validation rejects a legacy active pattern without compatible window fields', () => {
+    const profile = {
+      schema_version: 2 as const,
+      id: 'default',
+      category_set_ids: ['default'],
+      sources: [],
+      active_time: {
+        type: 'legacy' as const,
+        use_afk: true,
+        include_audible: true,
+        always_active_pattern: 'meeting',
+      },
+    };
+    const categorySets = [{ schema_version: 2 as const, id: 'default', categories: [] }];
+
+    expect(validateProfileRulesV2(profile, categorySets).join(' ')).toContain(
+      'requires a configured App & window source'
+    );
+    profile.sources = [{ ...defaultBuiltinWindowSource(), fields: ['url'] }];
+    expect(validateProfileRulesV2(profile, categorySets).join(' ')).toContain(
+      'requires the App & window source to expose app or title'
+    );
   });
 });

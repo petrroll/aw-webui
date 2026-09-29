@@ -5,7 +5,7 @@ import Color from 'color';
 import _ from 'lodash';
 
 import { useCategoryStore } from '~/stores/categories';
-import { getCategoryColorFromString } from '~/util/color';
+import { getColorFromString } from '~/util/color';
 import { seconds_to_duration } from '~/util/time';
 import { IEvent } from '~/util/interfaces';
 
@@ -83,7 +83,9 @@ function update(container: HTMLElement, apps: Entry[]) {
       const categoryStore = useCategoryStore();
       appcolor = categoryStore.get_category_color(app.colorKey);
     } else {
-      appcolor = app.color || getCategoryColorFromString(app.colorKey || app.name);
+      // Aggregated app/title rows do not have one rule result to infer locally.
+      // Use their explicit color or a stable neutral app color.
+      appcolor = app.color || getColorFromString(app.colorKey || app.name);
     }
 
     const hovercolor = Color(appcolor).darken(0.1).hex();

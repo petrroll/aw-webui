@@ -100,7 +100,6 @@ export default {
               hostHasResolvedActiveTimeV2(host, this.bucketsStore.buckets, compiledV2, {
                 includeAudible:
                   activeTime?.type === 'legacy' ? activeTime.include_audible : undefined,
-                browserBucketIds: this.bucketsStore.bucketsBrowser(host),
               }))
         ) ?? ''
       : '';
@@ -149,11 +148,13 @@ export default {
       return this.matchedCandidates(event).filter(candidate => candidate.id !== winner);
     },
     previewEventFields(event) {
-      return Object.entries(event.data ?? {}).filter(
-        ([key, value]) =>
-          !key.startsWith('$') &&
-          (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean')
-      );
+      return Object.entries(event.data ?? {})
+        .filter(
+          ([key, value]) =>
+            (!key.startsWith('$') || key.startsWith('$source.')) &&
+            (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean')
+        )
+        .map(([key, value]) => [key.replace(/^\$source\./, ''), value]);
     },
     previewEventTitle(event) {
       const fields = this.previewEventFields(event);

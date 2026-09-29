@@ -54,15 +54,15 @@
  */
 
 import {
-  appQuery,
-  activeTimeQuery,
   browser_appname_regex,
   canonicalEvents,
   canonicalMultideviceEvents,
+  fullDesktopQuery,
   queryStringToArray,
   RULE_ENGINE_CAPABILITIES,
   serializeQueryJson,
 } from '~/queries';
+import { androidAppQuery } from '~/legacy/queries';
 
 // Convert ActivityWatch (?i) patterns to JS RegExp with i flag for testing.
 // AW server uses Python-style (?i) inline flag; JS uses RegExp 'i' flag instead.
@@ -333,7 +333,7 @@ describe('flexible canonical queries', () => {
   });
 
   test('applies v2 categorization to Android app queries', () => {
-    const androidQuery = appQuery('aw-watcher-android_test', [], [], {
+    const androidQuery = androidAppQuery('aw-watcher-android_test', [], [], {
       category_specs: [{ id: 'work', name: ['Work'], rule: { type: 'none' } }],
       capabilities: [RULE_ENGINE_CAPABILITIES.categorize],
     }).join('\n');
@@ -459,9 +459,7 @@ describe('flexible canonical queries', () => {
   });
 
   test('serializes regexes containing an escaped quote without corrupting the query string', () => {
-    expect(serializeQueryJson({ regex: String.raw`a\"b` })).toBe(
-      String.raw`{"regex":"a\\\"b"}`
-    );
+    expect(serializeQueryJson({ regex: String.raw`a\"b` })).toBe(String.raw`{"regex":"a\\\"b"}`);
   });
 
   test('serializes custom field mappings without doubling raw backslashes', () => {
@@ -632,12 +630,8 @@ describe('flexible canonical queries', () => {
     expect(query).toContain('query_bucket_optional("meeting_desktop")');
     expect(query).not.toContain('aw-watcher-window');
     expect(query).not.toContain('aw-watcher-afk');
-    expect(query).toContain(
-      'events = period_union(events, activity_coverage_period_0)'
-    );
-    expect(query).toContain(
-      'events = period_union(events, activity_coverage_period_1)'
-    );
+    expect(query).toContain('events = period_union(events, activity_coverage_period_0)');
+    expect(query).toContain('events = period_union(events, activity_coverage_period_1)');
     expect(query).toContain('"source_id":"meeting"');
     expect(query).toContain('"source_id":"vdesktop"');
     expect(query).not.toContain('events = union_no_overlap(activity_coverage_source_');
@@ -868,32 +862,6 @@ describe('flexible canonical queries', () => {
     expect(query.match(/query_bucket\("stopwatch_laptop"\)/g)).toHaveLength(1);
   });
 
-  test('builds active-time-only queries without activity sources', () => {
-    const query = activeTimeQuery({
-      hostname: 'desktop',
-      capabilities: [RULE_ENGINE_CAPABILITIES.activePeriods],
-      active_time_sources: [
-        {
-          source_id: 'presence',
-          bucket_ids: ['presence_desktop'],
-          scope: 'host',
-          host: 'desktop',
-        },
-      ],
-      active_time_rule: {
-        type: 'regex',
-        source: 'presence',
-        field: 'present',
-        regex: 'true',
-      },
-    });
-
-    expect(query).toContain('active_periods_v2');
-    expect(query).toContain('RETURN = not_afk;');
-    expect(query).not.toContain('events =');
-    expect(query).not.toContain('categorize');
-  });
-
   test('does not infer global scope from missing ownership', () => {
     expect(() =>
       canonicalEvents({
@@ -928,6 +896,290 @@ describe('flexible canonical queries', () => {
       });
       expect(query).toContain('query_bucket_optional("calendar_global")');
     }
+  });
+
+  test('routes a legacy desktop signature through the current-server v2 pipeline', () => {
+    const query = canonicalEvents({
+      ...baseParams,
+      hostname: 'test',
+      capabilities: [
+        RULE_ENGINE_CAPABILITIES.categorize,
+        RULE_ENGINE_CAPABILITIES.sourceNamespace,
+        RULE_ENGINE_CAPABILITIES.activePeriods,
+        RULE_ENGINE_CAPABILITIES.optionalRawBucket,
+        RULE_ENGINE_CAPABILITIES.queryPeriod,
+        RULE_ENGINE_CAPABILITIES.floodV2,
+      ],
+    });
+
+    expect(query).toContain('query_bounds = query_period();');
+    expect(query).toContain(
+      'query_bucket_optional_raw(find_bucket("aw-watcher-window_test", "test"), "test", 5)'
+    );
+    expect(query).toContain('activity_coverage_source_0 = flood_v2(activity_coverage_source_0);');
+    expect(query).toContain(
+      'query_bucket_optional_raw(find_bucket("aw-watcher-afk_test", "test"), "test", 5)'
+    );
+    expect(query).toContain('active_source_0 = flood_v2(active_source_0);');
+    expect(query).toContain('events = period_union([], events);');
+    expect(query).toContain(
+      'events = merge_subwatcher_fields(events, activity_coverage_source_0, ["app","title"]);'
+    );
+    expect(query).toContain('events = categorize(events, []);');
+    expect(query).not.toContain('legacy_activity =');
+  });
+
+  test('loads focused browser facts once and honors audible compatibility flags', () => {
+    const capabilities = [
+      RULE_ENGINE_CAPABILITIES.categorize,
+      RULE_ENGINE_CAPABILITIES.sourceNamespace,
+      RULE_ENGINE_CAPABILITIES.activePeriods,
+      RULE_ENGINE_CAPABILITIES.optionalRawBucket,
+      RULE_ENGINE_CAPABILITIES.queryPeriod,
+      RULE_ENGINE_CAPABILITIES.floodV2,
+    ];
+    const build = (include_audible: boolean, active_time_rule?: any) =>
+      canonicalEvents({
+        ...baseParams,
+        hostname: 'host-a',
+        bid_window: 'aw-watcher-window_',
+        bid_afk: 'aw-watcher-afk_',
+        bid_browsers: ['aw-watcher-web-chrome_imported'],
+        include_audible,
+        active_time_rule,
+        active_time_sources: [],
+        capabilities,
+      });
+
+    const included = build(true);
+    const excluded = build(false);
+    const custom = build(true, { type: 'none' });
+
+    expect(
+      included.match(/query_bucket_optional_raw\("aw-watcher-web-chrome_imported"/g)
+    ).toHaveLength(1);
+    expect(included).not.toContain('active_source_1 = filter_period_intersect');
+    expect(included).toContain('"source":"browser_audible_0"');
+    expect(included).toContain('"type":"all"');
+    expect(included).toContain('"source":"builtin_window","field":"app"');
+    expect(included).toContain('"field":"audible"');
+    expect(included).toContain('"value_mode":"scalar"');
+    expect(included).toContain('browser_chrome_projected = merge_subwatcher_fields');
+    expect(included).toContain('browser_chrome = split_url_events(browser_chrome);');
+    expect(included).toContain(
+      'browser_events = filter_period_intersect(browser_events, query_bounds);'
+    );
+    expect(included).toContain('browser_events = filter_period_intersect(browser_events, events);');
+    expect(excluded).not.toContain('"field":"audible"');
+    expect(excluded).toContain('browser_chrome_projected = merge_subwatcher_fields');
+    expect(custom).not.toContain('"field":"audible"');
+  });
+
+  test('preserves host selectors and aliases always-active window facts', () => {
+    const query = canonicalEvents({
+      ...baseParams,
+      hostname: 'host-a',
+      bid_window: 'aw-watcher-window_',
+      bid_afk: 'aw-watcher-afk_',
+      always_active_pattern: 'meeting',
+      capabilities: [
+        RULE_ENGINE_CAPABILITIES.categorize,
+        RULE_ENGINE_CAPABILITIES.sourceNamespace,
+        RULE_ENGINE_CAPABILITIES.activePeriods,
+        RULE_ENGINE_CAPABILITIES.optionalRawBucket,
+        RULE_ENGINE_CAPABILITIES.queryPeriod,
+        RULE_ENGINE_CAPABILITIES.floodV2,
+      ],
+    });
+
+    expect(query).toContain(
+      'query_bucket_optional_raw(find_bucket("aw-watcher-window_", "host-a"), "host-a", 5)'
+    );
+    expect(query).toContain(
+      'query_bucket_optional_raw(find_bucket("aw-watcher-afk_", "host-a"), "host-a", 5)'
+    );
+    expect(query.match(/find_bucket\("aw-watcher-window_", "host-a"\)/g)).toHaveLength(1);
+    expect(query).toContain('active_source_1 = activity_coverage_source_0;');
+  });
+
+  test('finishes legacy output projection before binding suffixed results', () => {
+    const capabilities = [
+      RULE_ENGINE_CAPABILITIES.categorize,
+      RULE_ENGINE_CAPABILITIES.sourceNamespace,
+      RULE_ENGINE_CAPABILITIES.activePeriods,
+      RULE_ENGINE_CAPABILITIES.optionalRawBucket,
+      RULE_ENGINE_CAPABILITIES.queryPeriod,
+      RULE_ENGINE_CAPABILITIES.floodV2,
+    ];
+    const query = canonicalEvents({
+      ...baseParams,
+      hostname: 'host-a',
+      bid_window: 'aw-watcher-window_',
+      return_variable_suffix: 'host_a',
+      capabilities,
+    });
+    const projection = query.lastIndexOf('events = merge_subwatcher_fields');
+    const categorization = query.lastIndexOf('events = categorize');
+    const suffix = query.lastIndexOf('events_host_a = events;');
+    expect(suffix).toBeGreaterThan(projection);
+    expect(suffix).toBeGreaterThan(categorization);
+  });
+
+  test('loads window context before active aliases and honors prefix selectors', () => {
+    const query = canonicalEvents({
+      ...baseParams,
+      hostname: 'host-a',
+      bid_window: 'aw-watcher-window_',
+      legacy_window_mode: 'context',
+      always_active_pattern: 'Meeting',
+      activity_coverage_sources: [
+        {
+          source_id: 'meeting',
+          bucket_ids: ['meeting_host-a'],
+          scope: 'host',
+          host: 'host-a',
+          fields: ['state'],
+        },
+      ],
+      capabilities: [
+        RULE_ENGINE_CAPABILITIES.categorize,
+        RULE_ENGINE_CAPABILITIES.sourceNamespace,
+        RULE_ENGINE_CAPABILITIES.activePeriods,
+        RULE_ENGINE_CAPABILITIES.optionalRawBucket,
+        RULE_ENGINE_CAPABILITIES.queryPeriod,
+        RULE_ENGINE_CAPABILITIES.floodV2,
+      ],
+    });
+    const contextLoad = query.indexOf(
+      'query_bucket_optional_raw(find_bucket("aw-watcher-window_", "host-a"), "host-a", 5)'
+    );
+    const activeAlias = query.indexOf('active_source_1 = context_0;');
+    expect(contextLoad).toBeGreaterThan(-1);
+    expect(activeAlias).toBeGreaterThan(contextLoad);
+  });
+
+  test('full desktop wrapper always initializes its stopwatch projection', () => {
+    const query = fullDesktopQuery({
+      ...baseParams,
+      hostname: 'host-a',
+      capabilities: [
+        RULE_ENGINE_CAPABILITIES.categorize,
+        RULE_ENGINE_CAPABILITIES.sourceNamespace,
+        RULE_ENGINE_CAPABILITIES.activePeriods,
+        RULE_ENGINE_CAPABILITIES.optionalRawBucket,
+        RULE_ENGINE_CAPABILITIES.queryPeriod,
+        RULE_ENGINE_CAPABILITIES.floodV2,
+      ],
+    }).join('\n');
+    expect(query).toContain('stopwatch_events = [];');
+    expect(query).toContain(
+      'stopwatch_events = merge_events_by_keys(stopwatch_events, ["label"]);'
+    );
+  });
+
+  test('projects stopwatch labels before legacy categorization and suffix capture', () => {
+    const query = canonicalEvents({
+      ...baseParams,
+      hostname: 'host-a',
+      bid_stopwatch: 'stopwatch_host-a',
+      categories: [[['Meetings'], { type: 'regex', regex: 'Meeting', select_keys: ['label'] }]],
+      return_variable_suffix: 'host_a',
+      capabilities: [
+        RULE_ENGINE_CAPABILITIES.categorize,
+        RULE_ENGINE_CAPABILITIES.sourceNamespace,
+        RULE_ENGINE_CAPABILITIES.activePeriods,
+        RULE_ENGINE_CAPABILITIES.optionalRawBucket,
+        RULE_ENGINE_CAPABILITIES.queryPeriod,
+        RULE_ENGINE_CAPABILITIES.floodV2,
+      ],
+    });
+    const project = query.indexOf('events = union_no_overlap(stopwatch_events, events);');
+    const categorize = query.indexOf('events = categorize(events');
+    const suffix = query.indexOf('events_host_a = events;');
+    expect(project).toBeGreaterThan(-1);
+    expect(categorize).toBeGreaterThan(project);
+    expect(suffix).toBeGreaterThan(categorize);
+    expect(query).toContain(
+      'stopwatch_events = filter_period_intersect(stopwatch_events, events);'
+    );
+  });
+
+  test('rejects always-active compatibility without a window projection', () => {
+    expect(() =>
+      canonicalEvents({
+        ...baseParams,
+        legacy_window_mode: 'none',
+        always_active_pattern: 'meeting',
+        capabilities: [
+          RULE_ENGINE_CAPABILITIES.categorize,
+          RULE_ENGINE_CAPABILITIES.sourceNamespace,
+          RULE_ENGINE_CAPABILITIES.activePeriods,
+          RULE_ENGINE_CAPABILITIES.optionalRawBucket,
+          RULE_ENGINE_CAPABILITIES.queryPeriod,
+          RULE_ENGINE_CAPABILITIES.floodV2,
+        ],
+      })
+    ).toThrow('always_active_pattern requires a legacy window projection');
+  });
+
+  test('categorizes windowless coverage and restores it after a projection reset', () => {
+    const capabilities = [
+      RULE_ENGINE_CAPABILITIES.categorize,
+      RULE_ENGINE_CAPABILITIES.sourceNamespace,
+      RULE_ENGINE_CAPABILITIES.activePeriods,
+      RULE_ENGINE_CAPABILITIES.optionalRawBucket,
+      RULE_ENGINE_CAPABILITIES.queryPeriod,
+      RULE_ENGINE_CAPABILITIES.floodV2,
+    ];
+    const coverage = {
+      source_id: 'meeting',
+      bucket_ids: ['meeting-imported'],
+      scope: 'global' as const,
+      fields: ['project'],
+    };
+    const category_specs = [
+      {
+        id: 'work',
+        name: ['Work'],
+        rule: {
+          type: 'regex',
+          source: 'meeting',
+          field: 'project',
+          regex: '^Alpha$',
+        },
+      },
+    ];
+    const windowless = canonicalEvents({
+      hostname: 'host-a',
+      filter_afk: false,
+      categories: [],
+      filter_categories: [['Work']],
+      activity_coverage_sources: [coverage],
+      category_specs,
+      capabilities,
+    });
+    expect(windowless).toContain('events = categorize_v2(events');
+    expect(windowless.indexOf('categorize_v2')).toBeLessThan(
+      windowless.indexOf('filter_keyvals(events, "$category"')
+    );
+
+    const projected = canonicalEvents({
+      ...baseParams,
+      hostname: 'host-a',
+      filter_afk: false,
+      bid_window: 'aw-watcher-window_',
+      activity_coverage_sources: [coverage],
+      category_specs,
+      capabilities,
+    });
+    const reset = projected.indexOf('events = period_union([], events)');
+    expect(reset).toBeGreaterThan(-1);
+    expect(
+      projected.indexOf(
+        'merge_subwatcher_fields(events, activity_coverage_source_1, ["project"], {"source_id":"meeting","conflict":"base_wins"})',
+        reset
+      )
+    ).toBeGreaterThan(reset);
   });
 
   test('asks capable servers to enforce host-scoped source ownership', () => {

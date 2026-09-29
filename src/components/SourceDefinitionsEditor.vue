@@ -89,6 +89,15 @@ div
         | {{ $t('settings.categorization.sourceScopeGlobalHelp') }}
       small.text-muted(v-else)
         | {{ $t('settings.categorization.sourceScopeHostHelp') }}
+    b-form-group(:label="$t('settings.categorization.sourceIntervalPolicy')")
+      b-form-select(
+        size="sm"
+        :value="source.interval_policy || 'exact'"
+        @input="update(index, 'interval_policy', $event)"
+      )
+        option(value="exact") {{ $t('settings.categorization.sourceIntervalExact') }}
+        option(value="heartbeat") {{ $t('settings.categorization.sourceIntervalHeartbeat') }}
+      small.text-muted {{ $t('settings.categorization.sourceIntervalPolicyHelp') }}
     b-form-group(:label="$t('settings.categorization.fields')")
       b-form-input(
         size="sm"
@@ -109,6 +118,7 @@ div
 </template>
 
 <script lang="ts">
+import type { PropType } from 'vue';
 import {
   defaultBuiltinBrowserSource,
   defaultBuiltinStopwatchSource,
@@ -122,8 +132,8 @@ import { useServerStore } from '~/stores/server';
 export default {
   name: 'SourceDefinitionsEditor',
   props: {
-    value: { type: Array, required: true },
-    errors: { type: Array, default: () => [] },
+    value: { type: Array as PropType<SourceDefinitionV2[]>, required: true },
+    errors: { type: Array as PropType<string[]>, default: () => [] },
   },
   data() {
     return {
@@ -199,6 +209,15 @@ export default {
           updated.scope = 'host';
           updated.bucket_hosts = this.bucketHosts(bucketIds);
           delete updated.host;
+        }
+      }
+      if (field === 'fields') {
+        const fields = fieldValue as string[];
+        if (updated.field_types) {
+          updated.field_types = Object.fromEntries(
+            Object.entries(updated.field_types).filter(([name]) => fields.includes(name))
+          );
+          if (Object.keys(updated.field_types).length === 0) delete updated.field_types;
         }
       }
       return updated;

@@ -96,7 +96,6 @@ export const useViewsStore = defineStore('views', {
     },
     loadViews(views: View[]) {
       this.$patch({ views });
-      console.log('Loaded views:', this.views);
     },
     clearViews(this: State) {
       this.views = [];
@@ -131,8 +130,6 @@ export const useViewsStore = defineStore('views', {
         props,
       }: { view_id: string; el_id: string; type: string; props: Record<string, unknown> }
     ) {
-      console.log(view_id, el_id, type, props);
-      console.log(this.views);
       const element = this.views.find(v => v.id == view_id).elements[el_id];
       element.type = type;
       element.props = props;

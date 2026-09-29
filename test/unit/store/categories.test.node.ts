@@ -20,7 +20,11 @@ describe('categories store', () => {
     categoryStore.restoreDefaultClasses();
 
     expect(categoryStore.classes_unsaved_changes).toBeTruthy();
+    const settingsStore = useSettingsStore();
+    settingsStore.$patch({ _loaded: true });
+    const saveRules = jest.spyOn(settingsStore, 'saveCanonicalRulesV2').mockResolvedValue();
     await categoryStore.save();
+    saveRules.mockRestore();
 
     expect(categoryStore.classes_unsaved_changes).toBeFalsy();
     expect(categoryStore.classes).not.toHaveLength(0);
@@ -226,17 +230,20 @@ describe('categories store', () => {
     });
     const saveMock = jest.spyOn(settingsStore, 'saveCanonicalRulesV2').mockResolvedValue();
     const baselineSources = settingsStore.rulesV2.activity_profiles_v2[0].sources;
-    categoryStore.queueV2Sources([
-      {
-        id: 'desktop',
-        label: 'Virtual desktop',
-        bucket_ids: ['desktop'],
-        scope: 'global',
-        fields: ['vdesktop'],
-        activity_mode: 'fill-gaps' as const,
-        canonical_fields: { title: 'vdesktop' },
-      },
-    ], baselineSources);
+    categoryStore.queueV2Sources(
+      [
+        {
+          id: 'desktop',
+          label: 'Virtual desktop',
+          bucket_ids: ['desktop'],
+          scope: 'global',
+          fields: ['vdesktop'],
+          activity_mode: 'fill-gaps' as const,
+          canonical_fields: { title: 'vdesktop' },
+        },
+      ],
+      baselineSources
+    );
     settingsStore.activity_profiles_v2[0].sources.push({
       id: 'browser',
       label: 'Browser',
@@ -260,6 +267,307 @@ describe('categories store', () => {
       id: 'browser',
       label: 'Browser',
     });
+  });
+
+  test('refuses to save a combined multi-set view without explicit set selection', async () => {
+    const settingsStore = useSettingsStore();
+    settingsStore.$reset();
+    settingsStore.$patch({
+      _loaded: true,
+      activity_profiles_v2: [
+        {
+          schema_version: 2,
+          id: 'default',
+          category_set_ids: ['one', 'two'],
+          sources: defaultBuiltinSources(),
+          active_time: { type: 'expression', rule: { type: 'none' } },
+        },
+      ],
+      category_sets_v2: [
+        { schema_version: 2, id: 'one', categories: [] },
+        { schema_version: 2, id: 'two', categories: [] },
+      ],
+    });
+    categoryStore.load();
+    await expect(categoryStore.save()).rejects.toThrow('combined category-set view');
+  });
+
+  test('edits the explicitly selected inactive set without changing active composition', async () => {
+    const settingsStore = useSettingsStore();
+    settingsStore.$reset();
+    settingsStore.$patch({
+      _loaded: true,
+      activity_profiles_v2: [
+        {
+          schema_version: 2,
+          source_defaults_version: 4,
+          id: 'default',
+          category_set_ids: ['active'],
+          sources: defaultBuiltinSources(),
+          app_title_source_id: 'builtin_window',
+          browser_focus_source_id: 'builtin_window',
+          active_time: { type: 'expression', rule: { type: 'none' } },
+        },
+      ],
+      category_sets_v2: [
+        {
+          schema_version: 2,
+          id: 'active',
+          categories: [{ id: 'a', name: ['Active'], rule: { type: 'none' } }],
+        },
+        {
+          schema_version: 2,
+          id: 'inactive',
+          categories: [{ id: 'i', name: ['Inactive'], rule: { type: 'none' } }],
+        },
+      ],
+    });
+    const saveMock = jest.spyOn(settingsStore, 'saveCanonicalRulesV2').mockResolvedValue();
+
+    categoryStore.selectCategorySet('inactive');
+    const edited = categoryStore.get_category(['Inactive']);
+    categoryStore.updateClass({ ...edited, name: ['Edited inactive'] });
+    const customSource = {
+      id: 'custom',
+      label: 'Custom watcher',
+      bucket_ids: ['custom_inactive'],
+      scope: 'global' as const,
+      fields: ['state'],
+      auto_generated: true,
+    };
+    categoryStore.queueV2Sources(
+      [...settingsStore.rulesV2.activity_profiles_v2[0].sources, customSource],
+      settingsStore.rulesV2.activity_profiles_v2[0].sources
+    );
+    categoryStore.queueV2Edit({
+      categoryId: 'i',
+      originalName: ['Inactive'],
+      name: ['Edited inactive'],
+      rule: { type: 'regex', source: 'custom', field: 'state', regex: 'on' },
+      priority: 0,
+      requires: [],
+    });
+    await categoryStore.save();
+
+    const saved = saveMock.mock.calls[saveMock.mock.calls.length - 1][0];
+    expect(saved.profiles[0].category_set_ids).toEqual(['active']);
+    expect(saved.categorySets.find(set => set.id === 'active').categories[0].name).toEqual([
+      'Active',
+    ]);
+    expect(saved.categorySets.find(set => set.id === 'inactive').categories[0].name).toEqual([
+      'Edited inactive',
+    ]);
+    expect(saved.profiles[0].sources.find(source => source.id === 'custom')).toMatchObject({
+      bucket_ids: ['custom_inactive'],
+      auto_generated: true,
+    });
+  });
+
+  test('preserves select_keys semantics on a metadata-only save', async () => {
+    const settingsStore = useSettingsStore();
+    settingsStore.$reset();
+    settingsStore.$patch({
+      _loaded: true,
+      activity_profiles_v2: [
+        {
+          schema_version: 2,
+          id: 'default',
+          category_set_ids: ['default'],
+          sources: defaultBuiltinSources(),
+          active_time: {
+            type: 'legacy',
+            use_afk: true,
+            include_audible: true,
+            always_active_pattern: '',
+          },
+        },
+      ],
+      category_sets_v2: [
+        {
+          schema_version: 2,
+          id: 'default',
+          categories: [
+            {
+              id: 'work',
+              name: ['Work'],
+              rule: { type: 'regex', regex: 'Match', select_keys: ['title'] },
+              simple_ui: true,
+            },
+          ],
+        },
+      ],
+    });
+    categoryStore.selectCategorySet('default');
+    const category = categoryStore.get_category(['Work']);
+    categoryStore.updateClass({ ...category, data: { color: '#123456' } });
+    const save = jest.spyOn(settingsStore, 'saveCanonicalRulesV2').mockResolvedValue();
+
+    await categoryStore.save();
+
+    const saved = save.mock.calls[save.mock.calls.length - 1][0];
+    const rule = saved.categorySets[0].categories[0].rule;
+    expect(rule).toMatchObject({ type: 'regex', regex: 'Match', field: 'title' });
+  });
+
+  test('keeps draft identity separate from an existing canonical category ID', async () => {
+    const settingsStore = useSettingsStore();
+    settingsStore.$reset();
+    settingsStore.$patch({
+      _loaded: true,
+      activity_profiles_v2: [
+        {
+          schema_version: 2,
+          id: 'default',
+          category_set_ids: ['default'],
+          sources: defaultBuiltinSources(),
+          active_time: {
+            type: 'legacy',
+            use_afk: true,
+            include_audible: true,
+            always_active_pattern: '',
+          },
+        },
+      ],
+      category_sets_v2: [
+        {
+          schema_version: 2,
+          id: 'default',
+          categories: [
+            {
+              id: 'category-builder-1',
+              name: ['Work'],
+              rule: {
+                type: 'regex',
+                source: 'builtin_window',
+                field: 'title',
+                regex: 'Original',
+              },
+              simple_ui: false,
+            },
+          ],
+        },
+      ],
+    });
+    categoryStore.selectCategorySet('default');
+    categoryStore.addClass({ name: ['Suggested'], rule: { type: 'none' } });
+    categoryStore.queueV2Edit({
+      draftId: 'category-builder-1',
+      originalName: ['Suggested'],
+      name: ['Suggested'],
+      rule: { type: 'regex', source: 'builtin_window', field: 'title', regex: 'Suggested' },
+      priority: 0,
+      requires: [],
+    });
+    const save = jest.spyOn(settingsStore, 'saveCanonicalRulesV2').mockResolvedValue();
+
+    await categoryStore.save();
+
+    const saved = save.mock.calls[save.mock.calls.length - 1][0];
+    const categories = saved.categorySets[0].categories;
+    expect(categories.find(category => category.id === 'category-builder-1')).toMatchObject({
+      name: ['Work'],
+      rule: { regex: 'Original' },
+    });
+    expect(categories.find(category => category.name[0] === 'Suggested')).toMatchObject({
+      rule: { regex: 'Suggested' },
+    });
+  });
+
+  test('rolls back only a cancelled new-category draft', () => {
+    const existingEdit = {
+      categoryId: 'work',
+      originalName: ['Work'],
+      name: ['Work'],
+      rule: { type: 'regex' as const, regex: 'Pending' },
+      priority: 0,
+      requires: [],
+    };
+    categoryStore.queueV2Edit(existingEdit);
+    const wasDirty = categoryStore.classes_unsaved_changes;
+    const classId = categoryStore.addClass({ name: ['Suggested'], rule: { type: 'none' } });
+    categoryStore.queueV2Edit({
+      draftId: 'category-builder-draft',
+      originalName: ['Suggested'],
+      name: ['Suggested'],
+      rule: { type: 'regex', regex: 'Suggested' },
+      priority: 0,
+      requires: [],
+    });
+
+    categoryStore.discardNewClassDraft(classId, 'category-builder-draft', ['Suggested'], wasDirty);
+
+    expect(categoryStore.pending_v2_edits).toEqual([existingEdit]);
+    expect(categoryStore.classes.some(category => category.name[0] === 'Suggested')).toBe(false);
+    expect(categoryStore.classes_unsaved_changes).toBe(true);
+  });
+
+  test('retains edits queued while an earlier save is pending', async () => {
+    const settingsStore = useSettingsStore();
+    settingsStore.$reset();
+    const rules = {
+      activity_profiles_v2: [
+        {
+          schema_version: 2 as const,
+          id: 'default',
+          category_set_ids: ['default'],
+          sources: defaultBuiltinSources(),
+          active_time: {
+            type: 'legacy' as const,
+            use_afk: true,
+            include_audible: true,
+            always_active_pattern: '',
+          },
+        },
+      ],
+      category_sets_v2: [
+        {
+          schema_version: 2 as const,
+          id: 'default',
+          categories: [
+            {
+              id: 'work',
+              name: ['Work'],
+              rule: { type: 'regex' as const, regex: 'Original' },
+              simple_ui: true,
+            },
+          ],
+        },
+      ],
+    };
+    settingsStore.$patch({ ...rules, _loaded: true });
+    categoryStore.selectCategorySet('default');
+
+    let finishSave!: () => void;
+    jest.spyOn(settingsStore, 'saveCanonicalRulesV2').mockImplementation(
+      () =>
+        new Promise<void>(resolve => {
+          finishSave = resolve;
+        })
+    );
+    const baseEdit = {
+      categoryId: 'work',
+      originalName: ['Work'],
+      name: ['Work'],
+      priority: 0,
+      requires: [],
+    };
+    categoryStore.queueV2Edit({
+      ...baseEdit,
+      rule: { type: 'regex', source: 'builtin_window', regex: 'First' },
+    });
+    const saving = categoryStore.save();
+    for (let index = 0; index < 5 && !finishSave; index++) await Promise.resolve();
+    categoryStore.queueV2Edit({
+      ...baseEdit,
+      rule: { type: 'regex', source: 'builtin_window', regex: 'Latest' },
+    });
+    finishSave();
+    await saving;
+
+    expect(categoryStore.classes_unsaved_changes).toBe(true);
+    expect(categoryStore.pending_v2_edits).toEqual([
+      expect.objectContaining({ rule: expect.objectContaining({ regex: 'Latest' }) }),
+    ]);
   });
 
   test('modify a category after deleting another', () => {

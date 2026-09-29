@@ -134,7 +134,6 @@ export default {
               hostHasResolvedActiveTimeV2(host, this.bucketsStore.buckets, compiledV2, {
                 includeAudible:
                   activeTime?.type === 'legacy' ? activeTime.include_audible : undefined,
-                browserBucketIds: this.bucketsStore.bucketsBrowser(host),
               }))
         )
       : [];
@@ -164,15 +163,6 @@ export default {
 
     // Check current time of alert goals
     check: async function () {
-      const { query: query_array } = resolveActivityEventsQuery({
-        host: this.hostname,
-        filter_afk: this.filter_afk,
-        v2: {
-          filter_afk: this.filter_afk,
-          filter_categories: null,
-        },
-      });
-
       // Get start of today
       const start = moment().subtract(1, 'days').startOf('day');
       const end = moment(start).add(1, 'days');
@@ -180,12 +170,20 @@ export default {
 
       try {
         this.status = 'searching';
+        const { query: query_array } = resolveActivityEventsQuery({
+          host: this.hostname,
+          filter_afk: this.filter_afk,
+          v2: {
+            filter_afk: this.filter_afk,
+            filter_categories: null,
+          },
+        });
         const data = await this.$aw.query(timeperiods, query_array);
         this.events = data[0];
         this.error = '';
       } catch (e) {
         console.error(e);
-        this.error = e.response.data.message;
+        this.error = e?.response?.data?.message ?? (e instanceof Error ? e.message : String(e));
         return;
       } finally {
         this.status = null;

@@ -8,6 +8,13 @@ div#wrapper(v-if="loaded")
         | {{ $t('settings.categorization.advancedRulesNotApplied') }}
         router-link.ml-1(to="/settings")
           | {{ $t('settings.categorization.openRulesSettings') }}
+      b-alert(v-if="activityV2InvalidDiagnostics.length" show variant="danger")
+        | {{ $t('settings.categorization.invalidRulesNotApplied') }}
+        ul.mb-0
+          li(v-for="diagnostic in activityV2InvalidDiagnostics" :key="diagnostic")
+            | {{ diagnostic }}
+        router-link(to="/settings")
+          | {{ $t('settings.categorization.openRulesSettings') }}
       error-boundary
         user-satisfaction-poll
         new-release-notification(v-if="isNewReleaseCheckEnabled")
@@ -42,6 +49,9 @@ export default {
       if (!serverStore.info) return false;
       const settingsStore = useSettingsStore();
       return settingsStore.activityV2Unsupported;
+    },
+    activityV2InvalidDiagnostics() {
+      return useSettingsStore().invalidRulesV2Diagnostics;
     },
   },
 

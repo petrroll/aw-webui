@@ -1,17 +1,20 @@
-import type { Category } from '~/util/classes';
 import { validateRegex } from '~/util/validate';
+import { canUseSimpleCategoryUI, expressionUsesLegacyWindow } from '~/util/rulesV2Migration';
 
 export const RULES_SCHEMA_VERSION = 2 as const;
-export const SOURCE_DEFAULTS_VERSION = 3;
+export const SOURCE_DEFAULTS_VERSION = 4;
 export const MAX_EXPRESSION_DEPTH = 32;
 export const MAX_EXPRESSION_NODES = 4096;
 export const MAX_REGEX_LENGTH = 4096;
 export const MAX_CATEGORY_RULES = 1000;
 export const MAX_RULE_SOURCES = 128;
+export const MIN_RULE_RANK = -1_000_000;
+export const MAX_RULE_RANK = 1_000_000;
 export const BUILTIN_WINDOW_SOURCE_ID = 'builtin_window';
 export const BUILTIN_BROWSER_SOURCE_ID = 'browser';
 export const BUILTIN_STOPWATCH_SOURCE_ID = 'stopwatch';
 export type BuiltinSource = 'window' | 'browser' | 'stopwatch';
+export type SourceIntervalPolicy = 'exact' | 'heartbeat';
 
 export type RuleValueMode = 'string' | 'scalar';
 
@@ -26,6 +29,7 @@ export interface RegexExpressionV2 {
   host?: string;
   field?: string;
   fields?: string[];
+  select_keys?: string[];
   ignore_case?: boolean;
   negate?: boolean;
   value_mode?: RuleValueMode;
@@ -38,6 +42,14 @@ export interface GroupExpressionV2 {
 }
 
 export type RuleExpressionV2 = NoneExpressionV2 | RegexExpressionV2 | GroupExpressionV2;
+
+export function effectiveRuleSelector(
+  expression: Pick<RegexExpressionV2, 'fields' | 'field' | 'select_keys'>
+): string[] {
+  if (expression.fields !== undefined) return [...expression.fields];
+  if (expression.field !== undefined) return [expression.field];
+  return [...(expression.select_keys ?? [])];
+}
 
 export interface CategoryRuleV2 {
   [key: string]: unknown;
@@ -53,6 +65,8 @@ export interface CategoryRuleV2 {
 export interface CategorySetV2 {
   schema_version: typeof RULES_SCHEMA_VERSION;
   id: string;
+  /** Higher values win after rule/category/depth ranking ties. */
+  priority?: number;
   categories: CategoryRuleV2[];
 }
 
@@ -65,6 +79,7 @@ export interface SourceDefinitionV2 {
   bucket_hosts?: Record<string, string>;
   fields: string[];
   field_types?: Record<string, 'string' | 'scalar'>;
+  interval_policy?: SourceIntervalPolicy;
   auto_generated?: boolean;
   creates_activity?: boolean;
   keeps_active?: boolean;
@@ -106,6 +121,36 @@ export interface ActivityProfileV2 {
   active_time: ActiveTimeLegacyV2 | ActiveTimeExpressionV2;
 }
 
+export interface ProfileSourcesDraftV2 {
+  sources: SourceDefinitionV2[];
+  app_title_source_id: string | null;
+  browser_focus_source_id: string | null;
+}
+
+export function createProfileSourcesDraft(
+  profile: ActivityProfileV2 | undefined
+): ProfileSourcesDraftV2 {
+  return {
+    sources: JSON.parse(JSON.stringify(profile?.sources ?? [])),
+    app_title_source_id: profile?.app_title_source_id ?? null,
+    browser_focus_source_id: profile?.browser_focus_source_id ?? null,
+  };
+}
+
+export function profileSourcesDraftIsDirty(
+  draft: ProfileSourcesDraftV2,
+  profile: ActivityProfileV2 | undefined
+): boolean {
+  return JSON.stringify(draft) !== JSON.stringify(createProfileSourcesDraft(profile));
+}
+
+export function profileSourcesDraftForSave(
+  draft: ProfileSourcesDraftV2,
+  profile: ActivityProfileV2 | undefined
+): SourceDefinitionV2[] | undefined {
+  return profileSourcesDraftIsDirty(draft, profile) ? draft.sources : undefined;
+}
+
 export interface CompiledProfileQueryOptions {
   category_specs: CategoryRuleV2[];
   context_sources: Array<{
@@ -114,6 +159,7 @@ export interface CompiledProfileQueryOptions {
     scope?: 'host' | 'global';
     bucket_hosts?: Record<string, string>;
     fields: string[];
+    interval_policy?: SourceIntervalPolicy;
     conflict: 'base_wins';
     host?: string;
   }>;
@@ -123,6 +169,7 @@ export interface CompiledProfileQueryOptions {
     bucket_ids: string[];
     scope?: 'host' | 'global';
     bucket_hosts?: Record<string, string>;
+    interval_policy?: SourceIntervalPolicy;
     host?: string;
   }>;
   activity_coverage_sources: Array<{
@@ -131,6 +178,7 @@ export interface CompiledProfileQueryOptions {
     scope?: 'host' | 'global';
     bucket_hosts?: Record<string, string>;
     fields: string[];
+    interval_policy?: SourceIntervalPolicy;
     host?: string;
   }>;
   /** @deprecated Compatibility input for older query builders. */
@@ -159,8 +207,8 @@ export interface CompiledProfileQueryOptions {
 // ---------------------------------------------------------------------------
 // v2-pure compiled representation (no legacy window privilege).
 //
-// Unlike CompiledProfileQueryOptions (retained for the legacy query path and
-// un-migrated callers), this representation never carries legacy_window_mode.
+// Unlike CompiledProfileQueryOptions (used only by the explicit Android/old-target
+// path), this representation never carries legacy_window_mode.
 // The configured default window source is compiled into an ordinary namespaced
 // coverage/context source (identified by builtin: 'window' + source_id
 // BUILTIN_WINDOW_SOURCE_ID), with empty bucket_ids that are filled per-host by
@@ -172,6 +220,7 @@ export interface CompiledCoverageSourceV2 {
   source_id: string;
   builtin?: BuiltinSource;
   bucket_ids: string[];
+  interval_policy?: SourceIntervalPolicy;
   scope?: 'host' | 'global';
   bucket_hosts?: Record<string, string>;
   fields: string[];
@@ -187,6 +236,7 @@ export interface CompiledActiveSourceV2 {
   source_id: string;
   builtin?: BuiltinSource | 'afk';
   bucket_ids: string[];
+  interval_policy?: SourceIntervalPolicy;
   scope?: 'host' | 'global';
   bucket_hosts?: Record<string, string>;
   host?: string;
@@ -199,11 +249,13 @@ export interface CompiledLegacyActiveTimeV2 {
 }
 
 export interface CompiledActivityQueryV2 {
+  declared_source_ids?: string[];
   category_specs: Array<{
     id: string;
     name: string[];
     rule: RuleExpressionV2;
     priority?: number;
+    set_priority?: number;
     requires?: string[];
   }>;
   context_sources: CompiledContextSourceV2[];
@@ -212,6 +264,8 @@ export interface CompiledActivityQueryV2 {
   active_time_sources: CompiledActiveSourceV2[];
   app_title_source_id?: string;
   browser_focus_source_id?: string;
+  /** Browser projection and audible activity use this configured source plan. */
+  browser_source?: CompiledCoverageSourceV2;
   /**
    * Present when the profile keeps legacy active-time settings. Materialization
    * synthesizes an explicit AFK source/rule (and optional window always-active
@@ -221,6 +275,23 @@ export interface CompiledActivityQueryV2 {
   capabilities: string[];
 }
 
+export function allocateGeneratedSourceId(occupied: Set<string>, base: string): string {
+  let candidate = base;
+  let suffix = 2;
+  while (occupied.has(candidate)) candidate = `${base}_${suffix++}`;
+  occupied.add(candidate);
+  return candidate;
+}
+
+export function sourceIntervalPolicy(
+  source: Pick<SourceDefinitionV2, 'builtin' | 'interval_policy'>
+): SourceIntervalPolicy {
+  return (
+    source.interval_policy ??
+    (source.builtin === 'window' || source.builtin === 'browser' ? 'heartbeat' : 'exact')
+  );
+}
+
 export function defaultBuiltinWindowSource(createsActivity = true): SourceDefinitionV2 {
   return {
     id: BUILTIN_WINDOW_SOURCE_ID,
@@ -228,6 +299,7 @@ export function defaultBuiltinWindowSource(createsActivity = true): SourceDefini
     bucket_ids: [],
     builtin: 'window',
     fields: ['app', 'title'],
+    interval_policy: 'heartbeat',
     ...(createsActivity ? { creates_activity: true } : {}),
   };
 }
@@ -239,6 +311,14 @@ export function defaultBuiltinBrowserSource(): SourceDefinitionV2 {
     bucket_ids: [],
     builtin: 'browser',
     fields: ['title', 'url', 'audible', 'incognito', 'tabCount'],
+    field_types: {
+      title: 'string',
+      url: 'string',
+      audible: 'scalar',
+      incognito: 'scalar',
+      tabCount: 'scalar',
+    },
+    interval_policy: 'heartbeat',
   };
 }
 
@@ -249,6 +329,7 @@ export function defaultBuiltinStopwatchSource(): SourceDefinitionV2 {
     bucket_ids: [],
     builtin: 'stopwatch',
     fields: ['label'],
+    interval_policy: 'exact',
     creates_activity: true,
     keeps_active: true,
   };
@@ -288,6 +369,11 @@ export function initializeProfileSourceDefaults(
         stopwatch.keeps_active = true;
       }
     }
+    if (currentVersion < 4) {
+      for (const source of sources) {
+        source.interval_policy ??= sourceIntervalPolicy(source);
+      }
+    }
     return {
       ...profile,
       source_defaults_version: SOURCE_DEFAULTS_VERSION,
@@ -317,19 +403,30 @@ function isExactSourceDefinition(
   return expectedKeys.every(key => {
     const actualValue = Reflect.get(source, key);
     const expectedValue = Reflect.get(expected, key);
-    return Array.isArray(expectedValue)
-      ? Array.isArray(actualValue) &&
-          actualValue.length === expectedValue.length &&
-          actualValue.every((value, index) => value === expectedValue[index])
-      : actualValue === expectedValue;
+    if (Array.isArray(expectedValue)) {
+      return (
+        Array.isArray(actualValue) &&
+        actualValue.length === expectedValue.length &&
+        actualValue.every((value, index) => value === expectedValue[index])
+      );
+    }
+    if (expectedValue && typeof expectedValue === 'object') {
+      return JSON.stringify(actualValue) === JSON.stringify(expectedValue);
+    }
+    return actualValue === expectedValue;
   });
 }
 
-function isDefaultBuiltinSource(source: SourceDefinitionV2): boolean {
+export function isDefaultBuiltinSource(source: SourceDefinitionV2): boolean {
   if (isDefaultBuiltinWindowSource(source)) return true;
-  return [defaultBuiltinBrowserSource(), defaultBuiltinStopwatchSource()].some(expected =>
-    isExactSourceDefinition(source, expected)
-  );
+  return [defaultBuiltinBrowserSource(), defaultBuiltinStopwatchSource()].some(expected => {
+    if (source.builtin === 'browser' && source.field_types === undefined) {
+      const compatibleExpected = { ...expected };
+      delete compatibleExpected.field_types;
+      return isExactSourceDefinition(source, compatibleExpected);
+    }
+    return isExactSourceDefinition(source, expected);
+  });
 }
 
 export function mergeSourceDefinitionChanges(
@@ -350,383 +447,6 @@ export function mergeSourceDefinitionChanges(
   return merged;
 }
 
-export interface LegacyRule {
-  type: 'regex' | 'none' | null;
-  regex?: string;
-  ignore_case?: boolean;
-  select_keys?: string[];
-}
-
-export type RulesEditorMode = 'simple' | 'advanced';
-
-export interface CategorySimplificationLoss {
-  id: string;
-  path: string;
-  reasons: Array<'rule' | 'priority' | 'prerequisites'>;
-}
-
-export interface SourceSimplificationLoss {
-  id: string;
-  label: string;
-}
-
-export interface RulesSimplificationLossSet {
-  categories: CategorySimplificationLoss[];
-  active_time: RuleExpressionV2 | null;
-  sources: SourceSimplificationLoss[];
-}
-
-export function legacyRuleToV2(rule: LegacyRule): RuleExpressionV2 {
-  if (!rule || rule.type === 'none' || rule.type === null) {
-    return { type: 'none' };
-  }
-
-  const expression: RegexExpressionV2 = {
-    type: 'regex',
-    regex: rule.regex ?? '',
-    weight: 0,
-  };
-  if (rule.ignore_case) {
-    expression.ignore_case = true;
-  }
-  if (rule.select_keys?.length === 1) {
-    expression.field = rule.select_keys[0];
-  } else if (rule.select_keys && rule.select_keys.length > 1) {
-    expression.fields = [...rule.select_keys];
-  }
-  return expression;
-}
-
-export function isLegacyCompatibleRuleV2(
-  expression: RuleExpressionV2
-): expression is NoneExpressionV2 | RegexExpressionV2 {
-  if (expression.type === 'none') return true;
-  return (
-    expression.type === 'regex' &&
-    !expression.source &&
-    !expression.host &&
-    !expression.negate &&
-    (expression.weight === undefined || expression.weight === 0) &&
-    (expression.value_mode === undefined || expression.value_mode === 'string')
-  );
-}
-
-export function canUseSimpleCategoryUI(
-  category: Pick<CategoryRuleV2, 'rule' | 'priority' | 'requires'>
-): boolean {
-  return (
-    isLegacyCompatibleRuleV2(category.rule) &&
-    (category.priority === undefined || category.priority === 0) &&
-    (category.requires?.length ?? 0) === 0
-  );
-}
-
-function normalizeCategoryRuleV2(category: CategoryRuleV2): CategoryRuleV2 {
-  const current = { ...category };
-  delete current.legacy_rule;
-  const normalized: CategoryRuleV2 = {
-    ...current,
-    name: [...category.name],
-    rule: JSON.parse(JSON.stringify(category.rule)),
-    ...(category.requires ? { requires: [...category.requires] } : {}),
-    ...(category.data ? { data: { ...category.data } } : {}),
-  };
-  if (typeof normalized.simple_ui !== 'boolean') {
-    normalized.simple_ui = canUseSimpleCategoryUI(normalized);
-  }
-  return normalized;
-}
-
-export function v2RuleToLegacy(expression: RuleExpressionV2): LegacyRule | undefined {
-  if (!isLegacyCompatibleRuleV2(expression)) return undefined;
-  if (expression.type === 'none') return { type: 'none' };
-  const legacy: LegacyRule = {
-    type: 'regex',
-    regex: expression.regex,
-  };
-  if (expression.ignore_case !== undefined) legacy.ignore_case = expression.ignore_case;
-  if (expression.field) legacy.select_keys = [expression.field];
-  else if (expression.fields) legacy.select_keys = [...expression.fields];
-  return legacy;
-}
-
-function stableCategoryId(setId: string, category: Category): string {
-  return `${setId}:${category.name.map(encodeURIComponent).join('/')}`;
-}
-
-export function migrateCategorySet(categories: Category[], id = 'default'): CategorySetV2 {
-  return {
-    schema_version: RULES_SCHEMA_VERSION,
-    id,
-    categories: categories.map(category => {
-      const legacyRule = category.rule as LegacyRule;
-      return {
-        id: stableCategoryId(id, category),
-        name: [...category.name],
-        rule: legacyRuleToV2(legacyRule),
-        simple_ui: true,
-        ...(category.data ? { data: { ...category.data } } : {}),
-      };
-    }),
-  };
-}
-
-export function categorySetToLegacyClasses(
-  set: CategorySetV2,
-  _fallbackClasses: Category[] = []
-): Category[] {
-  return set.categories.map(category => ({
-    name: [...category.name],
-    rule: (canUseSimpleCategoryUI(category) ? v2RuleToLegacy(category.rule) : undefined) ?? {
-      type: 'none',
-    },
-    ...(category.data ? { data: { ...category.data } } : {}),
-  }));
-}
-
-export function migrateLegacySettings(input: {
-  classes: Category[];
-  always_active_pattern?: string;
-  include_audible?: boolean;
-}): {
-  category_sets_v2: CategorySetV2[];
-  activity_profiles_v2: ActivityProfileV2[];
-} {
-  return {
-    category_sets_v2: [migrateCategorySet(input.classes)],
-    activity_profiles_v2: [
-      {
-        schema_version: RULES_SCHEMA_VERSION,
-        source_defaults_version: SOURCE_DEFAULTS_VERSION,
-        id: 'default',
-        category_set_ids: ['default'],
-        sources: defaultBuiltinSources(),
-        app_title_source_id: BUILTIN_WINDOW_SOURCE_ID,
-        browser_focus_source_id: BUILTIN_WINDOW_SOURCE_ID,
-        active_time: {
-          type: 'legacy',
-          use_afk: true,
-          include_audible: input.include_audible ?? true,
-          always_active_pattern: input.always_active_pattern ?? '',
-        },
-      },
-    ],
-  };
-}
-
-export function resolveRulesV2Settings(input: {
-  activity_profiles_v2: ActivityProfileV2[] | null;
-  category_sets_v2: CategorySetV2[] | null;
-  classes: Category[];
-  always_active_pattern?: string;
-}): {
-  activity_profiles_v2: ActivityProfileV2[];
-  category_sets_v2: CategorySetV2[];
-  migrated: boolean;
-} {
-  const migrated = migrateLegacySettings(input);
-  const profile = input.activity_profiles_v2?.[0] ?? migrated.activity_profiles_v2[0];
-  const preferredSetId = profile.category_set_ids[0];
-  const categorySet =
-    input.category_sets_v2?.find(set => set.id === preferredSetId) ??
-    input.category_sets_v2?.[0] ??
-    migrated.category_sets_v2[0];
-
-  const normalizedSet: CategorySetV2 = {
-    ...categorySet,
-    categories: categorySet.categories.map(normalizeCategoryRuleV2),
-  };
-
-  const normalizedProfile: ActivityProfileV2 = {
-    ...profile,
-    category_set_ids: profile.category_set_ids.includes(normalizedSet.id)
-      ? [normalizedSet.id, ...profile.category_set_ids.filter(id => id !== normalizedSet.id)]
-      : [normalizedSet.id],
-    // Do not force-reinject the default window source on every load: an Advanced
-    // profile that legitimately removed it must round-trip unchanged. The window
-    // source is seeded only by migrateLegacySettings when creating a fresh profile.
-    sources: profile.sources.map(source => {
-      const normalized: SourceDefinitionV2 = {
-        ...source,
-        bucket_ids: [...source.bucket_ids],
-        fields: [...source.fields],
-        ...(source.bucket_hosts ? { bucket_hosts: { ...source.bucket_hosts } } : {}),
-      };
-      if (normalized.auto_generated && normalized.host) {
-        normalized.bucket_hosts ??= Object.fromEntries(
-          normalized.bucket_ids.map(bucketId => [bucketId, normalized.host as string])
-        );
-        delete normalized.host;
-      }
-      if (!normalized.scope && (normalized.host || normalized.bucket_hosts)) {
-        normalized.scope = 'host';
-      }
-      const activityMode =
-        normalized.activity_mode ??
-        (normalized.role === 'activity' || normalized.merge_mode === 'replace'
-          ? 'replace'
-          : normalized.role === 'background' || normalized.merge_mode === 'enrich'
-          ? 'fill-gaps'
-          : undefined);
-      normalized.creates_activity ??= activityMode !== undefined;
-      if (!normalized.creates_activity) delete normalized.creates_activity;
-      delete normalized.activity_mode;
-      delete normalized.role;
-      delete normalized.merge_mode;
-      delete normalized.priority;
-      delete normalized.legacy_fields;
-      delete normalized.canonical_fields;
-      return normalized;
-    }),
-    active_time: JSON.parse(JSON.stringify(profile.active_time)),
-  };
-
-  return {
-    activity_profiles_v2: [
-      normalizedProfile,
-      ...(input.activity_profiles_v2 ?? []).filter(candidate => candidate.id !== profile.id),
-    ],
-    category_sets_v2: [
-      normalizedSet,
-      ...(input.category_sets_v2 ?? []).filter(candidate => candidate.id !== normalizedSet.id),
-    ],
-    migrated: input.activity_profiles_v2 === null || input.category_sets_v2 === null,
-  };
-}
-
-export function inferRulesEditorMode(
-  profile: ActivityProfileV2,
-  categorySet: CategorySetV2
-): RulesEditorMode {
-  const hasEveryDefaultSource =
-    profile.sources.length === defaultBuiltinSources().length &&
-    profile.sources.every(isDefaultBuiltinSource);
-  if (
-    !hasEveryDefaultSource ||
-    profile.app_title_source_id !== BUILTIN_WINDOW_SOURCE_ID ||
-    profile.browser_focus_source_id !== BUILTIN_WINDOW_SOURCE_ID ||
-    profile.active_time.type === 'expression' ||
-    categorySet.categories.some(category => category.simple_ui !== true)
-  ) {
-    return 'advanced';
-  }
-  return 'simple';
-}
-
-function expressionUsesLegacyWindow(expression: RuleExpressionV2): boolean {
-  if (expression.type === 'regex') return !expression.source;
-  if (expression.type === 'all' || expression.type === 'any') {
-    return expression.rules.some(expressionUsesLegacyWindow);
-  }
-  return false;
-}
-
-export function getLegacyWindowMode(
-  profile: ActivityProfileV2,
-  categorySet: CategorySetV2
-): 'activity' | 'context' | 'none' {
-  const windowSource = profile.sources.find(source => source.builtin === 'window');
-  if (windowSource) {
-    if (windowSource.creates_activity) return 'activity';
-  } else if (inferRulesEditorMode(profile, categorySet) === 'simple') {
-    return 'activity';
-  }
-  if (
-    categorySet.categories.some(
-      category => category.rule.type !== 'none' && expressionUsesLegacyWindow(category.rule)
-    )
-  ) {
-    return windowSource ? 'context' : 'none';
-  }
-  if (profile.active_time.type === 'legacy' && profile.active_time.always_active_pattern) {
-    return 'context';
-  }
-  return 'none';
-}
-
-export function computeRulesSimplificationLosses(
-  profile: ActivityProfileV2,
-  categorySet: CategorySetV2
-): RulesSimplificationLossSet {
-  return {
-    categories: categorySet.categories.flatMap(category => {
-      const reasons: CategorySimplificationLoss['reasons'] = [];
-      if (!isLegacyCompatibleRuleV2(category.rule)) {
-        reasons.push('rule');
-      }
-      if ((category.priority ?? 0) !== 0) {
-        reasons.push('priority');
-      }
-      if ((category.requires?.length ?? 0) > 0) {
-        reasons.push('prerequisites');
-      }
-      return reasons.length ? [{ id: category.id, path: category.name.join(' > '), reasons }] : [];
-    }),
-    active_time:
-      profile.active_time.type === 'expression'
-        ? JSON.parse(JSON.stringify(profile.active_time.rule))
-        : null,
-    sources: profile.sources
-      .filter(source => !isDefaultBuiltinSource(source))
-      .map(source => ({
-        id: source.id,
-        label: source.label,
-      })),
-  };
-}
-
-export function hasRulesSimplificationLosses(losses: RulesSimplificationLossSet): boolean {
-  return losses.categories.length > 0 || losses.active_time !== null || losses.sources.length > 0;
-}
-
-export function applyRulesSimplification(input: {
-  profile: ActivityProfileV2;
-  categorySet: CategorySetV2;
-  always_active_pattern: string;
-}): {
-  activity_profiles_v2: ActivityProfileV2[];
-  category_sets_v2: CategorySetV2[];
-  classes: Category[];
-} {
-  const categorySet: CategorySetV2 = {
-    ...input.categorySet,
-    categories: input.categorySet.categories.map(category => {
-      const rule = isLegacyCompatibleRuleV2(category.rule)
-        ? JSON.parse(JSON.stringify(category.rule))
-        : { type: 'none' as const };
-      const simplified: CategoryRuleV2 = {
-        ...category,
-        name: [...category.name],
-        rule,
-        simple_ui: true,
-        ...(category.data ? { data: { ...category.data } } : {}),
-      };
-      delete simplified.priority;
-      delete simplified.requires;
-      return simplified;
-    }),
-  };
-  const profile: ActivityProfileV2 = {
-    ...input.profile,
-    source_defaults_version: SOURCE_DEFAULTS_VERSION,
-    category_set_ids: [categorySet.id],
-    sources: defaultBuiltinSources(),
-    app_title_source_id: BUILTIN_WINDOW_SOURCE_ID,
-    browser_focus_source_id: BUILTIN_WINDOW_SOURCE_ID,
-    active_time: {
-      type: 'legacy',
-      use_afk: true,
-      include_audible: true,
-      always_active_pattern: input.always_active_pattern,
-    },
-  };
-  return {
-    activity_profiles_v2: [profile],
-    category_sets_v2: [categorySet],
-    classes: categorySetToLegacyClasses(categorySet),
-  };
-}
-
 interface RuleValidationState {
   nodes: number;
   sources: Set<string>;
@@ -736,7 +456,8 @@ export function validateRuleExpression(
   expression: RuleExpressionV2,
   path = 'rule',
   state: RuleValidationState = { nodes: 0, sources: new Set<string>() },
-  depth = 1
+  depth = 1,
+  allowNoneChildren = false
 ): string[] {
   if (depth > MAX_EXPRESSION_DEPTH) {
     return [`${path} exceeds maximum depth of ${MAX_EXPRESSION_DEPTH}`];
@@ -757,11 +478,18 @@ export function validateRuleExpression(
     else if (expression.regex.length > MAX_REGEX_LENGTH) {
       errors.push(`${path}.regex exceeds maximum length of ${MAX_REGEX_LENGTH}`);
     } else if (!validateRegex(expression.regex)) errors.push(`${path}.regex is invalid`);
-    if (expression.weight !== undefined && !Number.isInteger(expression.weight)) {
-      errors.push(`${path}.weight must be an integer`);
+    if (expression.field !== undefined && expression.fields !== undefined) {
+      errors.push(`${path} may not define both field and fields`);
     }
-    if (expression.field && expression.fields) {
-      errors.push(`${path} cannot contain both field and fields`);
+    if (
+      expression.weight !== undefined &&
+      (!Number.isInteger(expression.weight) ||
+        expression.weight < MIN_RULE_RANK ||
+        expression.weight > MAX_RULE_RANK)
+    ) {
+      errors.push(
+        `${path}.weight must be an integer between ${MIN_RULE_RANK} and ${MAX_RULE_RANK}`
+      );
     }
     if (expression.source) {
       state.sources.add(expression.source);
@@ -779,9 +507,15 @@ export function validateRuleExpression(
       return [`${path}.rules must contain at least one rule`];
     }
     return expression.rules.flatMap((rule, index) =>
-      rule.type === 'none'
+      rule && typeof rule === 'object' && rule.type === 'none' && !allowNoneChildren
         ? [`${path}.rules[${index}] must be configured`]
-        : validateRuleExpression(rule, `${path}.rules[${index}]`, state, depth + 1)
+        : validateRuleExpression(
+            rule,
+            `${path}.rules[${index}]`,
+            state,
+            depth + 1,
+            allowNoneChildren
+          )
     );
   }
   return [`${path}.type is unsupported`];
@@ -789,36 +523,85 @@ export function validateRuleExpression(
 
 export function validateCategorySet(set: CategorySetV2): string[] {
   const errors: string[] = [];
-  if (set.schema_version !== RULES_SCHEMA_VERSION) errors.push('unsupported schema_version');
-  if (!set.id) errors.push('category set id must be non-empty');
+  if (!set || typeof set !== 'object' || Array.isArray(set)) {
+    return ['category set must be an object'];
+  }
+  if (set.schema_version !== RULES_SCHEMA_VERSION) errors.push('schema_version must be 2');
+  if (typeof set.id !== 'string' || !set.id) errors.push('id must be a non-empty string');
+  if (!Array.isArray(set.categories)) {
+    errors.push('categories must be an array');
+    return errors;
+  }
+  if (
+    set.priority !== undefined &&
+    (!Number.isInteger(set.priority) ||
+      set.priority < MIN_RULE_RANK ||
+      set.priority > MAX_RULE_RANK)
+  ) {
+    errors.push(
+      `category set priority must be an integer between ${MIN_RULE_RANK} and ${MAX_RULE_RANK}`
+    );
+  }
 
   const ids = new Set<string>();
+  let shapeInvalid = false;
   const validationState: RuleValidationState = { nodes: 0, sources: new Set<string>() };
   if (set.categories.length > MAX_CATEGORY_RULES) {
     errors.push(`categories exceed maximum count of ${MAX_CATEGORY_RULES}`);
   }
   for (const [index, category] of set.categories.entries()) {
     const path = `categories[${index}]`;
-    if (!category.id) errors.push(`${path}.id must be non-empty`);
+    if (!category || typeof category !== 'object' || Array.isArray(category)) {
+      errors.push(`${path} must be an object`);
+      shapeInvalid = true;
+      continue;
+    }
+    if (typeof category.id !== 'string' || !category.id) {
+      errors.push(`${path}.id must be a non-empty string`);
+    }
     if (ids.has(category.id)) errors.push(`${path}.id is duplicated`);
     ids.add(category.id);
-    if (!category.name.length || category.name.some(segment => !segment)) {
-      errors.push(`${path}.name must contain non-empty segments`);
+    const validName =
+      Array.isArray(category.name) &&
+      category.name.length > 0 &&
+      category.name.every(segment => typeof segment === 'string' && !!segment);
+    if (!validName) {
+      errors.push(`${path}.name must contain non-empty string segments`);
     }
-    if (category.priority !== undefined && !Number.isInteger(category.priority)) {
-      errors.push(`${path}.priority must be an integer`);
+    if (!category.rule || typeof category.rule !== 'object' || Array.isArray(category.rule)) {
+      errors.push(`${path}.rule must be an object`);
+      shapeInvalid = true;
+      continue;
+    }
+    if (category.requires !== undefined && !Array.isArray(category.requires)) {
+      errors.push(`${path}.requires must be an array`);
+      shapeInvalid = true;
+    }
+    if (
+      category.priority !== undefined &&
+      (!Number.isInteger(category.priority) ||
+        category.priority < MIN_RULE_RANK ||
+        category.priority > MAX_RULE_RANK)
+    ) {
+      errors.push(
+        `${path}.priority must be an integer between ${MIN_RULE_RANK} and ${MAX_RULE_RANK}`
+      );
     }
     if (category.simple_ui === true && !canUseSimpleCategoryUI(category)) {
       errors.push(`${path}.simple_ui is true but the category is not simple-compatible`);
     }
     errors.push(...validateRuleExpression(category.rule, `${path}.rule`, validationState));
   }
+  // Cross-reference and cycle checks assume object categories and iterable
+  // prerequisites. Shape diagnostics above are sufficient and must not be
+  // replaced by an incidental JavaScript TypeError.
+  if (shapeInvalid) return errors;
   const byId = new Map(set.categories.map(category => [category.id, category]));
   for (const [index, category] of set.categories.entries()) {
     for (const requirement of category.requires ?? []) {
       if (!ids.has(requirement)) {
         errors.push(`categories[${index}].requires references unknown id ${requirement}`);
-      } else if (byId.get(requirement)?.rule.type === 'none') {
+      } else if (byId.get(requirement)?.rule?.type === 'none') {
         errors.push(
           `categories[${index}].requires references category without a matching rule ${requirement}`
         );
@@ -848,12 +631,20 @@ export function validateActivityProfile(
   categorySetIds: Set<string>
 ): string[] {
   const errors: string[] = [];
-  if (profile.schema_version !== RULES_SCHEMA_VERSION) errors.push('unsupported schema_version');
-  if (!profile.id) errors.push('activity profile id must be non-empty');
+  if (!profile || typeof profile !== 'object' || Array.isArray(profile)) {
+    return ['activity profile must be an object'];
+  }
+  if (profile.schema_version !== RULES_SCHEMA_VERSION) errors.push('schema_version must be 2');
+  if (typeof profile.id !== 'string' || !profile.id) errors.push('id must be a non-empty string');
+  if (!Array.isArray(profile.category_set_ids)) {
+    errors.push('category_set_ids must be a non-empty string array');
+    return errors;
+  }
   if (profile.category_set_ids.length === 0) {
     errors.push('activity profile must select at least one category set');
-  } else if (profile.category_set_ids.length !== 1) {
-    errors.push('activity profile must select exactly one category set');
+  }
+  if (new Set(profile.category_set_ids).size !== profile.category_set_ids.length) {
+    errors.push('activity profile category_set_ids must be unique');
   }
   for (const categorySetId of profile.category_set_ids) {
     if (!categorySetIds.has(categorySetId)) {
@@ -861,30 +652,69 @@ export function validateActivityProfile(
     }
   }
 
+  if (!Array.isArray(profile.sources)) {
+    errors.push('sources must be an array');
+    return errors;
+  }
+  if (
+    !profile.active_time ||
+    typeof profile.active_time !== 'object' ||
+    Array.isArray(profile.active_time)
+  ) {
+    errors.push('active_time must be an object');
+    return errors;
+  }
   const sourceIds = new Set<string>();
+  let sourceShapeInvalid = false;
   if (profile.sources.length > MAX_RULE_SOURCES) {
     errors.push(`sources exceed maximum count of ${MAX_RULE_SOURCES}`);
   }
   for (const [index, source] of profile.sources.entries()) {
-    if (!/^[A-Za-z0-9_-]+$/.test(source.id)) {
+    if (!source || typeof source !== 'object' || Array.isArray(source)) {
+      errors.push(`sources[${index}] must be an object`);
+      sourceShapeInvalid = true;
+      continue;
+    }
+    if (typeof source.id !== 'string' || !/^[A-Za-z0-9_-]+$/.test(source.id)) {
       errors.push(`sources[${index}].id is invalid`);
+    }
+    if (typeof source.label !== 'string' || !source.label) {
+      errors.push(`sources[${index}].label must be non-empty`);
     }
     if (sourceIds.has(source.id)) errors.push(`sources[${index}].id is duplicated`);
     sourceIds.add(source.id);
-    if (source.builtin) {
+    if (
+      !Array.isArray(source.bucket_ids) ||
+      source.bucket_ids.some(bucketId => typeof bucketId !== 'string' || !bucketId)
+    ) {
+      errors.push(`sources[${index}].bucket_ids must be a string array`);
+      sourceShapeInvalid = true;
+      continue;
+    }
+    if (
+      !Array.isArray(source.fields) ||
+      source.fields.some(field => typeof field !== 'string' || !field)
+    ) {
+      errors.push(`sources[${index}].fields must be a string array`);
+      sourceShapeInvalid = true;
+      continue;
+    }
+    if (source.fields.length === 0) {
+      errors.push(`sources[${index}].fields must be non-empty`);
+      sourceShapeInvalid = true;
+      continue;
+    }
+    if (source.builtin !== undefined) {
       const expectedId = {
         window: BUILTIN_WINDOW_SOURCE_ID,
         browser: BUILTIN_BROWSER_SOURCE_ID,
         stopwatch: BUILTIN_STOPWATCH_SOURCE_ID,
       }[source.builtin];
-      if (source.id !== expectedId) {
+      if (!expectedId || source.id !== expectedId) {
         errors.push(`sources[${index}].builtin is unsupported`);
       }
     } else if (source.bucket_ids.length === 0) {
       errors.push(`sources[${index}].bucket_ids must be non-empty`);
-    }
-    if (source.fields.length === 0) {
-      errors.push(`sources[${index}].fields must be non-empty`);
     }
     if (source.creates_activity !== undefined && typeof source.creates_activity !== 'boolean') {
       errors.push(`sources[${index}].creates_activity must be boolean`);
@@ -892,11 +722,38 @@ export function validateActivityProfile(
     if (source.keeps_active !== undefined && typeof source.keeps_active !== 'boolean') {
       errors.push(`sources[${index}].keeps_active must be boolean`);
     }
+    if (source.auto_generated !== undefined && typeof source.auto_generated !== 'boolean') {
+      errors.push(`sources[${index}].auto_generated must be boolean`);
+    }
     if (source.keeps_active && !source.creates_activity) {
       errors.push(`sources[${index}].keeps_active requires creates_activity`);
     }
-    if (source.host !== undefined && !source.host) {
+    if (
+      source.interval_policy !== undefined &&
+      source.interval_policy !== 'exact' &&
+      source.interval_policy !== 'heartbeat'
+    ) {
+      errors.push(`sources[${index}].interval_policy must be exact or heartbeat`);
+    }
+    if (source.host !== undefined && (typeof source.host !== 'string' || !source.host)) {
       errors.push(`sources[${index}].host must be non-empty`);
+    }
+    if (source.field_types !== undefined) {
+      if (
+        !source.field_types ||
+        typeof source.field_types !== 'object' ||
+        Array.isArray(source.field_types)
+      ) {
+        errors.push(`sources[${index}].field_types must be an object`);
+      } else if (Object.keys(source.field_types).some(field => !source.fields.includes(field))) {
+        errors.push(`sources[${index}].field_types may only describe configured fields`);
+      } else if (
+        Object.values(source.field_types).some(
+          fieldType => fieldType !== 'string' && fieldType !== 'scalar'
+        )
+      ) {
+        errors.push(`sources[${index}].field_types values must be string or scalar`);
+      }
     }
     if (source.builtin && source.bucket_ids.length === 0) {
       continue;
@@ -909,6 +766,8 @@ export function validateActivityProfile(
     const scope = source.scope ?? (source.host || hasCompleteBucketHosts ? 'host' : undefined);
     if (!scope) {
       errors.push(`sources[${index}].scope must be explicit`);
+    } else if (scope !== 'host' && scope !== 'global') {
+      errors.push(`sources[${index}].scope must be host or global`);
     } else if (scope === 'global') {
       if (source.host || source.bucket_hosts) {
         errors.push(`sources[${index}] global scope cannot define host ownership`);
@@ -920,6 +779,9 @@ export function validateActivityProfile(
     }
     if (new Set(source.bucket_ids).size !== source.bucket_ids.length) {
       errors.push(`sources[${index}].bucket_ids must be unique`);
+    }
+    if (new Set(source.fields).size !== source.fields.length) {
+      errors.push(`sources[${index}].fields must be unique`);
     }
     if (
       source.bucket_hosts &&
@@ -936,6 +798,7 @@ export function validateActivityProfile(
       }
     }
   }
+  if (sourceShapeInvalid) return errors;
   if (
     profile.app_title_source_id !== undefined &&
     typeof profile.app_title_source_id !== 'string'
@@ -949,7 +812,15 @@ export function validateActivityProfile(
     errors.push('browser_focus_source_id must be a string');
   }
   if (profile.active_time.type === 'expression') {
-    errors.push(...validateRuleExpression(profile.active_time.rule, 'active_time.rule'));
+    errors.push(
+      ...validateRuleExpression(
+        profile.active_time.rule,
+        'active_time.rule',
+        { nodes: 0, sources: new Set<string>() },
+        1,
+        true
+      )
+    );
     errors.push(...validateActiveTimeSources(profile.active_time.rule));
     for (const sourceId of collectRuleSourceIds(profile.active_time.rule)) {
       const source = profile.sources.find(candidate => candidate.id === sourceId);
@@ -967,13 +838,17 @@ function validateActiveTimeSources(
   expression: RuleExpressionV2,
   path = 'active_time.rule'
 ): string[] {
+  if (!expression || typeof expression !== 'object' || Array.isArray(expression)) {
+    return [`${path} must be an object`];
+  }
   if (expression.type === 'none') {
-    return [`${path} must contain at least one matching condition`];
+    return [];
   }
   if (expression.type === 'regex') {
     return expression.source ? [] : [`${path}.source must be non-empty`];
   }
   if (expression.type === 'all' || expression.type === 'any') {
+    if (!Array.isArray(expression.rules)) return [`${path}.rules must be an array`];
     return expression.rules.flatMap((rule, index) =>
       validateActiveTimeSources(rule, `${path}.rules[${index}]`)
     );
@@ -982,10 +857,12 @@ function validateActiveTimeSources(
 }
 
 export function collectRuleSourceIds(expression: RuleExpressionV2): Set<string> {
+  if (!expression || typeof expression !== 'object' || Array.isArray(expression)) return new Set();
   if (expression.type === 'regex') {
     return new Set(expression.source ? [expression.source] : []);
   }
   if (expression.type === 'all' || expression.type === 'any') {
+    if (!Array.isArray(expression.rules)) return new Set();
     return new Set(expression.rules.flatMap(rule => [...collectRuleSourceIds(rule)]));
   }
   return new Set();
@@ -996,478 +873,126 @@ export function validateProfileRulesV2(
   categorySets: CategorySetV2[]
 ): string[] {
   const errors: string[] = [];
-  errors.push(...validateActivityProfile(profile, new Set(categorySets.map(set => set.id))));
-  const set = categorySets.find(candidate => candidate.id === profile.category_set_ids[0]);
-  if (set) {
-    errors.push(...validateCategorySet(set));
-    for (const category of set.categories) {
-      for (const sourceId of collectRuleSourceIds(category.rule)) {
-        const source = profile.sources.find(candidate => candidate.id === sourceId);
-        if (!source) {
-          errors.push(`category ${category.id} references unknown source ${sourceId}`);
-        }
-        // v2 allows explicit `source: builtin_window` references; the builtin window
-        // source compiles into an ordinary namespaced coverage/context source.
+  if (!Array.isArray(categorySets)) return ['category_sets_v2 must be an array'];
+  const categoryShapeInvalid = categorySets.some(
+    set =>
+      !set ||
+      typeof set !== 'object' ||
+      Array.isArray(set) ||
+      !Array.isArray(set.categories) ||
+      set.categories.some(
+        category =>
+          !category ||
+          typeof category !== 'object' ||
+          Array.isArray(category) ||
+          !category.rule ||
+          typeof category.rule !== 'object' ||
+          Array.isArray(category.rule) ||
+          (category.requires !== undefined && !Array.isArray(category.requires))
+      )
+  );
+  const categorySetIds = new Set(
+    categorySets
+      .filter(set => !!set && typeof set === 'object' && !Array.isArray(set))
+      .map(set => set.id)
+  );
+  errors.push(...validateActivityProfile(profile, categorySetIds));
+  const profileShapeInvalid =
+    !profile ||
+    typeof profile !== 'object' ||
+    Array.isArray(profile) ||
+    !Array.isArray(profile.category_set_ids) ||
+    !Array.isArray(profile.sources) ||
+    profile.sources.some(
+      source =>
+        !source ||
+        typeof source !== 'object' ||
+        Array.isArray(source) ||
+        !Array.isArray(source.bucket_ids) ||
+        !Array.isArray(source.fields)
+    ) ||
+    !profile.active_time ||
+    typeof profile.active_time !== 'object' ||
+    Array.isArray(profile.active_time);
+  if (profileShapeInvalid || categoryShapeInvalid) {
+    for (const [index, set] of categorySets.entries()) {
+      errors.push(...validateCategorySet(set).map(error => `category_sets_v2[${index}].${error}`));
+    }
+    return errors;
+  }
+  const selectedSets = profile.category_set_ids
+    .map(id => categorySets.find(candidate => candidate?.id === id))
+    .filter((set): set is CategorySetV2 => !!set);
+  const selectedCategoryCount = selectedSets.reduce(
+    (count, set) => count + (Array.isArray(set.categories) ? set.categories.length : 0),
+    0
+  );
+  if (selectedCategoryCount > MAX_CATEGORY_RULES) {
+    errors.push(
+      `category_set_ids select ${selectedCategoryCount} category rules; maximum is ${MAX_CATEGORY_RULES}`
+    );
+  }
+  const aggregateState: RuleValidationState = { nodes: 0, sources: new Set<string>() };
+  for (const set of selectedSets) {
+    if (!Array.isArray(set.categories)) continue;
+    for (const [index, category] of set.categories.entries()) {
+      if (category?.rule) {
+        errors.push(
+          ...validateRuleExpression(
+            category.rule,
+            `category_set_ids[${set.id}].categories[${index}].rule`,
+            aggregateState
+          )
+        );
       }
+    }
+  }
+  if (aggregateState.sources.size > MAX_RULE_SOURCES) {
+    errors.push(`selected category rules exceed maximum source count of ${MAX_RULE_SOURCES}`);
+  }
+  const windowSource = profile.sources.find(source => source.builtin === 'window');
+  for (const set of selectedSets) {
+    errors.push(...validateCategorySet(set).map(error => `${set.id}: ${error}`));
+    if (
+      !windowSource &&
+      set.categories.some(
+        category =>
+          category &&
+          typeof category === 'object' &&
+          category.rule &&
+          category.rule.type !== 'none' &&
+          expressionUsesLegacyWindow(category.rule)
+      )
+    ) {
+      errors.push(
+        `category set ${set.id}: unsourced category rules require the App & window source`
+      );
+    }
+    for (const category of set.categories) {
+      if (!category || typeof category !== 'object' || !category.rule) continue;
+      for (const sourceId of collectRuleSourceIds(category.rule)) {
+        if (!profile.sources.some(candidate => candidate.id === sourceId)) {
+          errors.push(`category ${set.id}/${category.id} references unknown source ${sourceId}`);
+        }
+      }
+    }
+  }
+  if (profile.active_time.type === 'legacy' && profile.active_time.always_active_pattern) {
+    if (!windowSource) {
+      errors.push('active_time.always_active_pattern requires a configured App & window source');
+    } else if (!windowSource.fields.some(field => field === 'app' || field === 'title')) {
+      errors.push(
+        'active_time.always_active_pattern requires the App & window source to expose app or title'
+      );
     }
   }
   return errors;
 }
 
-export function compileProfileQueryOptions(
-  profile: ActivityProfileV2,
-  categorySets: CategorySetV2[],
-  capabilities: string[]
-): CompiledProfileQueryOptions {
-  const errors = validateProfileRulesV2(profile, categorySets);
-  if (errors.length > 0) {
-    throw new Error(`Invalid v2 rules settings: ${errors.join('; ')}`);
-  }
-  if (!capabilities.includes('query.categorize_v2.v1')) {
-    throw new Error('Flexible categorization requires server capability query.categorize_v2.v1');
-  }
-  const categorySet = categorySets.find(candidate => candidate.id === profile.category_set_ids[0]);
-  if (!categorySet) {
-    throw new Error(`Category set ${profile.category_set_ids[0]} is unavailable`);
-  }
-
-  const categorySpecs = categorySet.categories.map(category => ({
-    id: category.id,
-    name: [...category.name],
-    rule: JSON.parse(JSON.stringify(category.rule)) as RuleExpressionV2,
-    ...(category.priority !== undefined ? { priority: category.priority } : {}),
-    requires: category.requires ? [...category.requires] : undefined,
-  }));
-  const legacyWindowMode = getLegacyWindowMode(profile, categorySet);
-
-  const categorySourceIds = new Set(
-    categorySet.categories.flatMap(category => [...collectRuleSourceIds(category.rule)])
-  );
-  const contextSources = profile.sources
-    .filter(source => source.builtin !== 'window')
-    .filter(source => categorySourceIds.has(source.id) && !source.creates_activity)
-    .map(source => ({
-      source_id: source.id,
-      bucket_ids: [...source.bucket_ids],
-      scope: source.scope,
-      ...(source.bucket_hosts ? { bucket_hosts: { ...source.bucket_hosts } } : {}),
-      fields: [...source.fields],
-      conflict: 'base_wins' as const,
-      host: source.host,
-      ...(source.builtin ? { builtin: source.builtin } : {}),
-    }));
-  if (
-    (contextSources.length > 0 || legacyWindowMode === 'context') &&
-    !capabilities.includes('query.merge_subwatcher_fields.source_namespace.v1')
-  ) {
-    throw new Error(
-      'Context enrichment requires server capability ' +
-        'query.merge_subwatcher_fields.source_namespace.v1'
-    );
-  }
-  const windowSource =
-    profile.sources.find(source => source.builtin === 'window') ?? defaultBuiltinWindowSource();
-  const result: CompiledProfileQueryOptions = {
-    category_specs: categorySpecs,
-    context_sources: contextSources,
-    activity_coverage_sources: profile.sources
-      .filter(source => source.builtin !== 'window')
-      .filter(source => source.creates_activity)
-      .filter(
-        source =>
-          source.builtin !== 'stopwatch' ||
-          capabilities.includes('query.merge_subwatcher_fields.source_namespace.v1')
-      )
-      .map(source => ({
-        source_id: source.id,
-        bucket_ids: [...source.bucket_ids],
-        scope: source.scope,
-        ...(source.bucket_hosts ? { bucket_hosts: { ...source.bucket_hosts } } : {}),
-        fields: [...source.fields],
-        host: source.host,
-        ...(source.builtin ? { builtin: source.builtin } : {}),
-      })),
-    activity_sources: [],
-    background_sources: [],
-    capabilities: [...capabilities],
-    legacy_window_mode: legacyWindowMode,
-    legacy_window_fields: [...windowSource.fields],
-  };
-  if (
-    result.activity_coverage_sources.length > 0 &&
-    !capabilities.includes('query.merge_subwatcher_fields.source_namespace.v1')
-  ) {
-    throw new Error(
-      'Activity coverage sources require server capability ' +
-        'query.merge_subwatcher_fields.source_namespace.v1'
-    );
-  }
-  if (profile.active_time.type === 'expression') {
-    if (!capabilities.includes('query.active_periods_v2.v1')) {
-      throw new Error(
-        'Active-time expressions require server capability query.active_periods_v2.v1'
-      );
-    }
-    result.active_time_rule = profile.active_time.rule;
-    const activeSourceIds = collectRuleSourceIds(profile.active_time.rule);
-    result.active_time_sources = profile.sources
-      .filter(source => source.builtin !== 'window')
-      .filter(source => activeSourceIds.has(source.id))
-      .map(source => ({
-        source_id: source.id,
-        bucket_ids: [...source.bucket_ids],
-        scope: source.scope,
-        ...(source.bucket_hosts ? { bucket_hosts: { ...source.bucket_hosts } } : {}),
-        host: source.host,
-        ...(source.builtin ? { builtin: source.builtin } : {}),
-      }));
-  }
-  return result;
-}
-
-function rewriteUnsourcedToWindow(expression: RuleExpressionV2): RuleExpressionV2 {
-  if (expression.type === 'regex') {
-    return expression.source ? expression : { ...expression, source: BUILTIN_WINDOW_SOURCE_ID };
-  }
-  if (expression.type === 'all' || expression.type === 'any') {
-    return { ...expression, rules: expression.rules.map(rewriteUnsourcedToWindow) };
-  }
-  return expression;
-}
-
-// Compiles a v2 profile into the v2-pure representation. The configured default
-// window source becomes an ordinary namespaced coverage/context source; unsourced
-// legacy category rules are rewritten to `source: builtin_window`. No
-// legacy_window_mode/root injection is ever produced.
-export function compileActivityQueryV2(
-  profile: ActivityProfileV2,
-  categorySets: CategorySetV2[],
-  capabilities: string[]
-): CompiledActivityQueryV2 {
-  const errors = validateProfileRulesV2(profile, categorySets);
-  if (errors.length > 0) {
-    throw new Error(`Invalid v2 rules settings: ${errors.join('; ')}`);
-  }
-  if (
-    profile.active_time.type === 'legacy' &&
-    profile.active_time.always_active_pattern &&
-    !profile.sources.some(source => source.builtin === 'window')
-  ) {
-    // Capable v2 path: removing the window source while an always-active pattern
-    // still depends on it must surface as validation rather than being silently
-    // rediscovered at runtime. (Legacy compileProfileQueryOptions keeps the old
-    // discover-window-as-context behavior for old-server compatibility.)
-    throw new Error(
-      'Invalid v2 rules settings: active_time.always_active_pattern requires a configured window source; remove the pattern or re-add the window source'
-    );
-  }
-  if (!capabilities.includes('query.categorize_v2.v1')) {
-    throw new Error('Flexible categorization requires server capability query.categorize_v2.v1');
-  }
-  const categorySet = categorySets.find(candidate => candidate.id === profile.category_set_ids[0]);
-  if (!categorySet) {
-    throw new Error(`Category set ${profile.category_set_ids[0]} is unavailable`);
-  }
-  if (
-    !profile.sources.some(source => source.builtin === 'window') &&
-    categorySet.categories.some(
-      category => category.rule.type !== 'none' && expressionUsesLegacyWindow(category.rule)
-    )
-  ) {
-    throw new Error(
-      'Invalid v2 rules settings: unsourced category rules require the App & window source'
-    );
-  }
-
-  const category_specs = categorySet.categories.map(category => ({
-    id: category.id,
-    name: [...category.name],
-    rule: rewriteUnsourcedToWindow(JSON.parse(JSON.stringify(category.rule)) as RuleExpressionV2),
-    ...(category.priority !== undefined ? { priority: category.priority } : {}),
-    requires: category.requires ? [...category.requires] : undefined,
-  }));
-
-  const categorySourceIds = new Set(
-    category_specs.flatMap(category => [...collectRuleSourceIds(category.rule)])
-  );
-  const presentationSourceIds = new Set(
-    [profile.app_title_source_id, profile.browser_focus_source_id].filter(
-      (sourceId): sourceId is string => !!sourceId
-    )
-  );
-
-  const activity_coverage_sources: CompiledCoverageSourceV2[] = [];
-  const context_sources: CompiledContextSourceV2[] = [];
-  for (const source of profile.sources) {
-    if (source.builtin === 'window') {
-      const location = {
-        bucket_ids: [...source.bucket_ids],
-        scope: source.bucket_ids.length === 0 ? ('host' as const) : source.scope,
-        ...(source.bucket_hosts ? { bucket_hosts: { ...source.bucket_hosts } } : {}),
-        host: source.host,
-      };
-      if (source.creates_activity) {
-        activity_coverage_sources.push({
-          source_id: BUILTIN_WINDOW_SOURCE_ID,
-          builtin: 'window',
-          ...location,
-          fields: [...source.fields],
-          ...(source.keeps_active ? { keeps_active: true } : {}),
-        });
-      } else if (
-        categorySourceIds.has(BUILTIN_WINDOW_SOURCE_ID) ||
-        presentationSourceIds.has(BUILTIN_WINDOW_SOURCE_ID)
-      ) {
-        context_sources.push({
-          source_id: BUILTIN_WINDOW_SOURCE_ID,
-          builtin: 'window',
-          ...location,
-          fields: [...source.fields],
-          conflict: 'base_wins',
-        });
-      }
-      continue;
-    }
-    const location = {
-      bucket_ids: [...source.bucket_ids],
-      scope: source.bucket_ids.length === 0 && source.builtin ? ('host' as const) : source.scope,
-      ...(source.bucket_hosts ? { bucket_hosts: { ...source.bucket_hosts } } : {}),
-      host: source.host,
-      ...(source.builtin ? { builtin: source.builtin } : {}),
-    };
-    if (source.creates_activity) {
-      activity_coverage_sources.push({
-        source_id: source.id,
-        ...location,
-        fields: [...source.fields],
-        ...(source.keeps_active ? { keeps_active: true } : {}),
-      });
-    } else if (categorySourceIds.has(source.id) || presentationSourceIds.has(source.id)) {
-      context_sources.push({
-        source_id: source.id,
-        ...location,
-        fields: [...source.fields],
-        conflict: 'base_wins',
-      });
-    }
-  }
-
-  const needsNamespace = activity_coverage_sources.length > 0 || context_sources.length > 0;
-  if (
-    needsNamespace &&
-    !capabilities.includes('query.merge_subwatcher_fields.source_namespace.v1')
-  ) {
-    throw new Error(
-      'Namespaced source enrichment requires server capability ' +
-        'query.merge_subwatcher_fields.source_namespace.v1'
-    );
-  }
-
-  const result: CompiledActivityQueryV2 = {
-    category_specs,
-    context_sources,
-    activity_coverage_sources,
-    active_time_sources: [],
-    app_title_source_id: profile.app_title_source_id,
-    browser_focus_source_id: profile.browser_focus_source_id,
-    capabilities: [...capabilities],
-  };
-
-  if (profile.active_time.type === 'expression') {
-    if (!capabilities.includes('query.active_periods_v2.v1')) {
-      throw new Error(
-        'Active-time expressions require server capability query.active_periods_v2.v1'
-      );
-    }
-    result.active_time_rule = JSON.parse(
-      JSON.stringify(profile.active_time.rule)
-    ) as RuleExpressionV2;
-    const activeSourceIds = collectRuleSourceIds(result.active_time_rule);
-    for (const source of profile.sources) {
-      if (
-        !activeSourceIds.has(source.builtin === 'window' ? BUILTIN_WINDOW_SOURCE_ID : source.id)
-      ) {
-        continue;
-      }
-      if (source.builtin === 'window') {
-        result.active_time_sources.push({
-          source_id: BUILTIN_WINDOW_SOURCE_ID,
-          builtin: 'window',
-          bucket_ids: [...source.bucket_ids],
-          scope: source.bucket_ids.length === 0 ? 'host' : source.scope,
-          ...(source.bucket_hosts ? { bucket_hosts: { ...source.bucket_hosts } } : {}),
-          host: source.host,
-        });
-      } else {
-        result.active_time_sources.push({
-          source_id: source.id,
-          bucket_ids: [...source.bucket_ids],
-          scope: source.bucket_ids.length === 0 && source.builtin ? 'host' : source.scope,
-          ...(source.bucket_hosts ? { bucket_hosts: { ...source.bucket_hosts } } : {}),
-          host: source.host,
-          ...(source.builtin ? { builtin: source.builtin } : {}),
-        });
-      }
-    }
-  } else {
-    result.legacy_active_time = {
-      use_afk: profile.active_time.use_afk,
-      include_audible: profile.active_time.include_audible,
-      always_active_pattern: profile.active_time.always_active_pattern,
-    };
-  }
-
-  return result;
-}
-
-export function findCategoryRuleV2(
-  profile: ActivityProfileV2,
-  categorySets: CategorySetV2[],
-  name: string[]
-): CategoryRuleV2 | undefined {
-  return findCategoryRuleLocationV2(profile, categorySets, name)?.category;
-}
-
-function findCategoryRuleLocationV2(
-  profile: ActivityProfileV2,
-  categorySets: CategorySetV2[],
-  name: string[]
-): { set: CategorySetV2; category: CategoryRuleV2 } | undefined {
-  const set = categorySets[0];
-  if (!set || profile.category_set_ids[0] !== set.id) return undefined;
-  const category = set.categories.find(
-    candidate => JSON.stringify(candidate.name) === JSON.stringify(name)
-  );
-  return category ? { set, category } : undefined;
-}
-
-function findCategoryRuleIdLocationV2(
-  profile: ActivityProfileV2,
-  categorySets: CategorySetV2[],
-  id: string
-): { set: CategorySetV2; category: CategoryRuleV2 } | undefined {
-  const set = categorySets[0];
-  if (!set || profile.category_set_ids[0] !== set.id) return undefined;
-  const category = set.categories.find(candidate => candidate.id === id);
-  return category ? { set, category } : undefined;
-}
-
-export function updateCategoryRuleV2(input: {
-  profileId: string;
-  profiles: ActivityProfileV2[];
-  categorySets: CategorySetV2[];
-  categoryId?: string;
-  originalName: string[];
-  name: string[];
-  rule: RuleExpressionV2;
-  priority: number;
-  requires: string[];
-}): { profiles: ActivityProfileV2[]; categorySets: CategorySetV2[] } {
-  const profiles: ActivityProfileV2[] = JSON.parse(JSON.stringify(input.profiles));
-  const categorySets: CategorySetV2[] = JSON.parse(JSON.stringify(input.categorySets));
-  const profile = profiles.find(candidate => candidate.id === input.profileId);
-  if (!profile) throw new Error(`Activity profile ${input.profileId} was not found`);
-
-  let matchLocation =
-    (input.categoryId
-      ? findCategoryRuleIdLocationV2(profile, categorySets, input.categoryId)
-      : undefined) ?? findCategoryRuleLocationV2(profile, categorySets, input.originalName);
-  if (!matchLocation) {
-    const set = categorySets[0];
-    if (set?.id !== profile.category_set_ids[0]) {
-      throw new Error('The activity profile has no editable category set');
-    }
-    if (!set) throw new Error('The activity profile has no editable category set');
-    const category: CategoryRuleV2 = {
-      id: `manual:${input.name.map(encodeURIComponent).join('/')}`,
-      name: [...input.name],
-      rule: { type: 'none' },
-    };
-    set.categories.push(category);
-    matchLocation = { set, category };
-  }
-  const { set, category } = matchLocation;
-  category.name = [...input.name];
-  category.rule = JSON.parse(JSON.stringify(input.rule));
-  category.priority = input.priority;
-  category.requires = [...input.requires];
-  category.simple_ui = canUseSimpleCategoryUI(category);
-  for (const candidate of set.categories) {
-    if (
-      candidate !== category &&
-      candidate.name.length > input.originalName.length &&
-      input.originalName.every((part, index) => candidate.name[index] === part)
-    ) {
-      candidate.name = [...input.name, ...candidate.name.slice(input.originalName.length)];
-    }
-  }
-  return { profiles, categorySets };
-}
-
-export function synchronizeCategoryTreeV2(input: {
-  profileId: string;
-  profiles: ActivityProfileV2[];
-  categorySets: CategorySetV2[];
-  classes: Category[];
-  replaceRules?: boolean;
-}): { profiles: ActivityProfileV2[]; categorySets: CategorySetV2[] } {
-  const profiles: ActivityProfileV2[] = JSON.parse(JSON.stringify(input.profiles));
-  const categorySets: CategorySetV2[] = JSON.parse(JSON.stringify(input.categorySets));
-  const profile = profiles.find(candidate => candidate.id === input.profileId);
-  const set = categorySets[0];
-  if (!profile || !set || profile.category_set_ids[0] !== set.id) {
-    throw new Error('The activity profile has no editable category set');
-  }
-
-  const names = new Set(input.classes.map(category => JSON.stringify(category.name)));
-  set.categories = set.categories.filter(category => names.has(JSON.stringify(category.name)));
-  for (const legacyCategory of input.classes) {
-    let category = set.categories.find(
-      candidate => JSON.stringify(candidate.name) === JSON.stringify(legacyCategory.name)
-    );
-    if (!category) {
-      category = migrateCategorySet([legacyCategory], set.id).categories[0];
-      set.categories.push(category);
-    } else if (input.replaceRules || category.simple_ui === true) {
-      category.rule = legacyRuleToV2(legacyCategory.rule as LegacyRule);
-      category.priority = 0;
-      category.requires = [];
-      category.simple_ui = true;
-    }
-    if (legacyCategory.data) category.data = { ...legacyCategory.data };
-    else delete category.data;
-  }
-  return { profiles, categorySets };
-}
-
-export function deleteCategoryRuleV2(input: {
-  profileId: string;
-  profiles: ActivityProfileV2[];
-  categorySets: CategorySetV2[];
-  categoryId?: string;
-  name: string[];
-}): { profiles: ActivityProfileV2[]; categorySets: CategorySetV2[] } {
-  const profiles: ActivityProfileV2[] = JSON.parse(JSON.stringify(input.profiles));
-  const categorySets: CategorySetV2[] = JSON.parse(JSON.stringify(input.categorySets));
-  const profile = profiles.find(candidate => candidate.id === input.profileId);
-  if (!profile) throw new Error(`Activity profile ${input.profileId} was not found`);
-  const matchLocation =
-    (input.categoryId
-      ? findCategoryRuleIdLocationV2(profile, categorySets, input.categoryId)
-      : undefined) ?? findCategoryRuleLocationV2(profile, categorySets, input.name);
-  if (matchLocation) {
-    const dependents = matchLocation.set.categories.filter(category =>
-      category.requires?.includes(matchLocation.category.id)
-    );
-    if (dependents.length > 0) {
-      throw new Error(
-        `Cannot delete ${matchLocation.category.name.join(' > ')} because it is required by ` +
-          dependents.map(category => category.name.join(' > ')).join(', ')
-      );
-    }
-    matchLocation.set.categories = matchLocation.set.categories.filter(
-      category => category !== matchLocation.category
-    );
-  }
-  return { profiles, categorySets };
-}
+// Stable import surface for external query generators.
+export * from '~/util/rulesV2Migration';
+export {
+  compileActivityQueryV2,
+  compileProfileQueryOptions,
+  compiledCategoryId,
+} from '~/util/rulesV2Compilation';

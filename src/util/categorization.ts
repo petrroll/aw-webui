@@ -30,7 +30,9 @@ export function findCommonPhrases(
 
   // Step 1: Build word duration dictionary
   for (const event of events) {
-    for (const word of event.data.title.split(SPLIT_REGEX)) {
+    const title = event.data?.title;
+    if (typeof title !== 'string') continue;
+    for (const word of title.split(SPLIT_REGEX)) {
       if (word.length <= 2 || ignored_words.includes(word)) {
         continue;
       }
@@ -46,7 +48,9 @@ export function findCommonPhrases(
 
   // Step 2: Build bigram duration dictionary (skip bigrams with filtered words)
   for (const event of events) {
-    const parts = event.data.title.split(SPLIT_REGEX);
+    const title = event.data?.title;
+    if (typeof title !== 'string') continue;
+    const parts = title.split(SPLIT_REGEX);
     for (let i = 0; i < parts.length - 1; i++) {
       const w1 = parts[i];
       const w2 = parts[i + 1];

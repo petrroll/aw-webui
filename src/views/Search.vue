@@ -44,9 +44,12 @@ div
 <script lang="ts">
 import _ from 'lodash';
 import moment from 'moment';
-import { resolveActivityEventsQuery } from '~/util/activityQuery';
-import { BUILTIN_WINDOW_SOURCE_ID } from '~/util/rulesV2';
+import {
+  projectMaterializedEventsForPresentation,
+  resolveActivityEventsQuery,
+} from '~/util/activityQuery';
 import { useBucketsStore } from '~/stores/buckets';
+import { useSettingsStore } from '~/stores/settings';
 
 import 'vue-awesome/icons/search';
 import 'vue-awesome/icons/spinner';
@@ -75,50 +78,64 @@ export default {
     search: async function () {
       const bucketsStore = useBucketsStore();
       await bucketsStore.ensureLoaded();
-      // v2: search app/title via the configured default window source (builtin_window).
-      // If that source is not configured the searched category matches nothing.
-      const { query: query_array } = resolveActivityEventsQuery({
-        host: this.queryOptions.hostname,
-        filter_afk: this.queryOptions.filter_afk,
-        v2: {
+      const appTitleSourceId = useSettingsStore().compiledActivityQueryV2?.app_title_source_id;
+      if (!appTitleSourceId) {
+        this.error = 'Search requires a configured app/title presentation source.';
+        return;
+      }
+      let built;
+      try {
+        built = resolveActivityEventsQuery({
+          host: this.queryOptions.hostname,
           filter_afk: this.queryOptions.filter_afk,
-          filter_categories: [['searched']],
-          category_specs: [
-            {
-              id: 'searched',
-              name: ['searched'],
-              rule: {
-                type: 'any',
-                rules: [
-                  {
-                    type: 'regex',
-                    source: BUILTIN_WINDOW_SOURCE_ID,
-                    field: 'app',
-                    regex: this.pattern,
-                  },
-                  {
-                    type: 'regex',
-                    source: BUILTIN_WINDOW_SOURCE_ID,
-                    field: 'title',
-                    regex: this.pattern,
-                  },
-                ],
+          v2: {
+            filter_afk: this.queryOptions.filter_afk,
+            filter_categories: [['searched']],
+            category_specs: [
+              {
+                id: 'searched',
+                name: ['searched'],
+                rule: {
+                  type: 'any',
+                  rules: [
+                    {
+                      type: 'regex',
+                      source: appTitleSourceId,
+                      field: 'app',
+                      regex: this.pattern,
+                    },
+                    {
+                      type: 'regex',
+                      source: appTitleSourceId,
+                      field: 'title',
+                      regex: this.pattern,
+                    },
+                  ],
+                },
               },
-            },
-          ],
-        },
-      });
+            ],
+          },
+        });
+      } catch (e) {
+        this.error = e instanceof Error ? e.message : String(e);
+        return;
+      }
+      const { query: query_array, materialized } = built;
       const timeperiods = [
         moment(this.queryOptions.start).format() + '/' + moment(this.queryOptions.stop).format(),
       ];
       try {
         this.status = 'searching';
         const data = await this.$aw.query(timeperiods, query_array);
-        this.events = _.orderBy(data[0], ['timestamp'], ['desc']);
+        this.events = _.orderBy(
+          projectMaterializedEventsForPresentation(data[0], materialized),
+          ['timestamp'],
+          ['desc']
+        );
         this.error = '';
       } catch (e) {
         console.error(e);
-        this.error = e.response.data.message;
+        this.error = e?.response?.data?.message ?? (e instanceof Error ? e.message : String(e));
       } finally {
         this.status = null;
       }

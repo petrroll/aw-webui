@@ -187,6 +187,7 @@ function pickDeepest(categories: Category[]) {
   return _.maxBy(categories, c => c.name.length);
 }
 
+/** Match the lossy legacy `classes` projection for old external integrations. */
 export function matchString(str: string, categories: Category[] | null): Category | null {
   if (!categories) {
     console.log(

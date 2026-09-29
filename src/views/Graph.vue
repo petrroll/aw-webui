@@ -109,32 +109,30 @@ export default {
       this.graphdata = this.generateGraphData(this.events);
     },
     fetchEvents: async function () {
-      // TODO: use full query (one per day/timeperiod) instead of resolving each period separately
       const filter_categories = this.excludeUncategorized
         ? this.categoryStore.classes_for_query.map(t => t[0])
         : null;
-      const { query: query_array } = resolveActivityEventsQuery({
-        host: this.queryOptions.hostname,
-        filter_afk: this.queryOptions.filter_afk,
-        v2: {
-          filter_afk: this.queryOptions.filter_afk,
-          filter_categories,
-        },
-      });
       const start = moment(this.queryOptions.start).format();
       const end = moment(this.queryOptions.stop).format();
       const timeperiods = [start + '/' + end];
       try {
         this.status = 'searching';
+        const { query: query_array } = resolveActivityEventsQuery({
+          host: this.queryOptions.hostname,
+          filter_afk: this.queryOptions.filter_afk,
+          v2: {
+            filter_afk: this.queryOptions.filter_afk,
+            filter_categories,
+          },
+        });
         const time = moment();
         const data = await getClient().query(timeperiods, query_array);
         this.error = '';
         this.queryTime = moment().diff(time);
-        console.log('done fetching events!');
         this.events = _.orderBy(data[0], ['timestamp'], ['desc']);
       } catch (e) {
         console.error(e);
-        this.error = e.response.data.message;
+        this.error = e?.response?.data?.message ?? (e instanceof Error ? e.message : String(e));
       } finally {
         this.status = null;
       }
@@ -204,7 +202,6 @@ export default {
         }
       }
 
-      console.log('generated nodes & links');
       return { nodes, links };
     },
     extendByWeek() {

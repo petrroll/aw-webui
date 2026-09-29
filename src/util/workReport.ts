@@ -6,7 +6,7 @@ import {
   type MultiQueryParams,
   queryStringToArray,
 } from '~/queries';
-import type { CompiledActivityQueryV2, CompiledProfileQueryOptions } from '~/util/rulesV2';
+import type { CompiledActivityQueryV2 } from '~/util/rulesV2';
 import { hostHasResolvedActivityV2, hostHasResolvedActiveTimeV2 } from '~/util/activityProfile';
 
 export interface WorkReportHostOption {
@@ -15,11 +15,7 @@ export interface WorkReportHostOption {
   disabled: boolean;
 }
 
-function getProfileHosts(
-  buckets: IBucket[],
-  _compiled?: CompiledProfileQueryOptions,
-  compiledV2?: CompiledActivityQueryV2
-): string[] {
+function getProfileHosts(buckets: IBucket[], compiledV2?: CompiledActivityQueryV2): string[] {
   const hosts = buckets
     .map(bucket => bucket.hostname || bucket.data?.hostname)
     .filter((host): host is string => !!host && host !== 'unknown');
@@ -31,43 +27,22 @@ function getProfileHosts(
 function hostCanResolveWorkReport(
   host: string,
   buckets: IBucket[],
-  _compiled?: CompiledProfileQueryOptions,
   compiledV2?: CompiledActivityQueryV2,
   includeAudible?: boolean
 ): boolean {
-  const browserBuckets = buckets.filter(bucket => bucket.type === 'web.tab.current');
-  const hostBrowserBucketIds = browserBuckets
-    .filter(
-      bucket => bucket.hostname === host || (!bucket.hostname && bucket.data?.hostname === host)
-    )
-    .map(bucket => bucket.id);
-  const browserBucketIds =
-    hostBrowserBucketIds.length > 0
-      ? hostBrowserBucketIds
-      : browserBuckets
-          .filter(
-            bucket =>
-              bucket.hostname === 'unknown' ||
-              (!bucket.hostname && bucket.data?.hostname === 'unknown')
-          )
-          .map(bucket => bucket.id);
   return compiledV2
     ? hostHasResolvedActivityV2(host, buckets, compiledV2) &&
-        hostHasResolvedActiveTimeV2(host, buckets, compiledV2, {
-          includeAudible,
-          browserBucketIds,
-        })
+        hostHasResolvedActiveTimeV2(host, buckets, compiledV2, { includeAudible })
     : false;
 }
 
 export function getWorkReportHostOptions(
   buckets: IBucket[],
-  compiled?: CompiledProfileQueryOptions,
   compiledV2?: CompiledActivityQueryV2,
   includeAudible?: boolean
 ): WorkReportHostOption[] {
-  return getProfileHosts(buckets, compiled, compiledV2).map(host => {
-    const supported = hostCanResolveWorkReport(host, buckets, compiled, compiledV2, includeAudible);
+  return getProfileHosts(buckets, compiledV2).map(host => {
+    const supported = hostCanResolveWorkReport(host, buckets, compiledV2, includeAudible);
     return {
       value: host,
       text: supported ? host : `${host} (requires an active-time source)`,
@@ -79,24 +54,22 @@ export function getWorkReportHostOptions(
 export function getUnsupportedWorkReportHosts(
   selectedHosts: string[],
   buckets: IBucket[],
-  compiled?: CompiledProfileQueryOptions,
   compiledV2?: CompiledActivityQueryV2,
   includeAudible?: boolean
 ): string[] {
   return selectedHosts.filter(
-    host => !hostCanResolveWorkReport(host, buckets, compiled, compiledV2, includeAudible)
+    host => !hostCanResolveWorkReport(host, buckets, compiledV2, includeAudible)
   );
 }
 
 export function getSupportedWorkReportHosts(
   selectedHosts: string[],
   buckets: IBucket[],
-  compiled?: CompiledProfileQueryOptions,
   compiledV2?: CompiledActivityQueryV2,
   includeAudible?: boolean
 ): string[] {
   const unsupportedHosts = new Set(
-    getUnsupportedWorkReportHosts(selectedHosts, buckets, compiled, compiledV2, includeAudible)
+    getUnsupportedWorkReportHosts(selectedHosts, buckets, compiledV2, includeAudible)
   );
   return selectedHosts.filter(host => !unsupportedHosts.has(host));
 }

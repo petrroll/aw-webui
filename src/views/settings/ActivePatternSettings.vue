@@ -20,7 +20,14 @@ div
         :state="(enabled || null) && valid"
         :disabled="advancedActive"
       )
-      small.text-right(v-if="!advancedActive")
+      b-btn.mt-1.float-right(
+        v-if="!advancedActive"
+        size="sm"
+        variant="primary"
+        :disabled="!simpleDraftDirty || !valid"
+        @click="saveSimple"
+      ) {{ $t('app.apply') }}
+      small.text-right.clearfix(v-if="!advancedActive")
         div.text-success(v-if="enabled && valid") {{ $t('settings.activePattern.enabled') }}
         div.text-danger(v-else-if="enabled") {{ $t('settings.activePattern.invalid') }}
         div.text-muted(v-else) {{ $t('settings.activePattern.disabled') }}
@@ -54,6 +61,13 @@ div
         b-form-invalid-feedback
           | {{ $t('settings.activePattern.invalid') }}
         small.text-muted {{ $t('settings.activePattern.help2') }}
+      b-btn.mb-2(
+        v-if="!advancedActive"
+        size="sm"
+        variant="primary"
+        :disabled="!simpleDraftDirty || !valid"
+        @click="saveSimple"
+      ) {{ $t('app.apply') }}
       b-alert.mb-2(variant="warning" :show="advancedActive")
         | {{ $t('settings.categorization.activeTimeAutomaticPending') }}
       b-btn(
@@ -102,6 +116,7 @@ import { isRegexBroad, validateRegex } from '~/util/validate';
 import { useSettingsStore } from '~/stores/settings';
 import { useCategoryStore } from '~/stores/categories';
 import { useServerStore } from '~/stores/server';
+import { draftMatchesSubmission, shouldSyncCanonicalDraft } from '~/util/rulesEditor';
 import RuleExpressionEditor from '~/components/RuleExpressionEditor.vue';
 import RulesValidationAlert from '~/components/RulesValidationAlert.vue';
 import {
@@ -124,9 +139,11 @@ export default {
       advancedSources: [] as SourceDefinitionV2[],
       advancedSaveError: '',
       loadedActiveTimeJson: '',
+      loadedSimplePattern: '',
       loadedAdvancedRuleJson: '',
       loadedAdvancedSourcesJson: '',
       advancedValidationAttempted: false,
+      activeSaveInFlight: 0,
     };
   },
   computed: {
@@ -175,11 +192,20 @@ export default {
     canonicalSourcesJson: function () {
       return JSON.stringify(this.settingsStore.rulesV2.activity_profiles_v2[0]?.sources ?? []);
     },
+    simpleDraftDirty: function () {
+      return this.always_active_pattern_editing !== this.loadedSimplePattern;
+    },
+    advancedSourcesDirty: function () {
+      return JSON.stringify(this.advancedSources) !== this.loadedAdvancedSourcesJson;
+    },
     advancedDraftDirty: function () {
       return (
         JSON.stringify(this.advancedRule) !== this.loadedAdvancedRuleJson ||
-        JSON.stringify(this.advancedSources) !== this.loadedAdvancedSourcesJson
+        this.advancedSourcesDirty
       );
+    },
+    activeDraftDirty: function () {
+      return this.simpleDraftDirty || this.advancedDraftDirty;
     },
     advancedErrors: function () {
       const profile = this.settingsStore.rulesV2.activity_profiles_v2[0];
@@ -195,29 +221,34 @@ export default {
         this.settingsStore.rulesV2.category_sets_v2
       );
     },
-    always_active_pattern: {
-      get() {
-        return this.settingsStore.always_active_pattern;
-      },
-      set(value) {
-        this.settingsStore.saveLegacyActiveTimeV2(value).catch(error => {
-          this.advancedSaveError = error instanceof Error ? error.message : String(error);
-        });
-      },
+    always_active_pattern: function () {
+      return this.settingsStore.always_active_pattern;
     },
   },
   watch: {
     canonicalActiveTimeJson: function (value) {
-      if (value !== this.loadedActiveTimeJson) {
+      if (
+        shouldSyncCanonicalDraft(
+          this.activeSaveInFlight > 0,
+          value !== this.loadedActiveTimeJson,
+          this.activeDraftDirty
+        )
+      ) {
         this.syncActiveTimeDraft();
       }
     },
     canonicalSourcesJson: function (value) {
-      if (value !== this.loadedAdvancedSourcesJson && !this.advancedDraftDirty) {
-        this.syncActiveTimeDraft();
+      if (
+        shouldSyncCanonicalDraft(
+          this.activeSaveInFlight > 0,
+          value !== this.loadedAdvancedSourcesJson,
+          this.advancedSourcesDirty
+        )
+      ) {
+        this.syncSourcesDraft();
       }
     },
-    advancedDraftDirty: function (value) {
+    activeDraftDirty: function (value) {
       this.categoryStore.setRulesV2DraftDirty('active-time', value);
     },
     activeModeDraft: function (value) {
@@ -233,18 +264,6 @@ export default {
         this.advancedValidationAttempted = false;
       }
     },
-    always_active_pattern_editing: function (value) {
-      if (value == this.always_active_pattern) {
-        return;
-      }
-
-      if (
-        (value != '' && this.valid) ||
-        (value == '' && this.settingsStore.always_active_pattern.length != 0)
-      ) {
-        this.always_active_pattern = value;
-      }
-    },
   },
   mounted() {
     this.syncActiveTimeDraft();
@@ -253,6 +272,11 @@ export default {
     this.categoryStore.setRulesV2DraftDirty('active-time', false);
   },
   methods: {
+    syncSourcesDraft() {
+      const sources = this.settingsStore.rulesV2.activity_profiles_v2[0]?.sources ?? [];
+      this.advancedSources = JSON.parse(JSON.stringify(sources));
+      this.loadedAdvancedSourcesJson = JSON.stringify(this.advancedSources);
+    },
     syncActiveTimeDraft() {
       const profile = this.settingsStore.rulesV2.activity_profiles_v2[0];
       const activeTime = profile?.active_time;
@@ -262,6 +286,7 @@ export default {
         activeTime?.type === 'legacy'
           ? activeTime.always_active_pattern
           : this.settingsStore.always_active_pattern;
+      this.loadedSimplePattern = this.always_active_pattern_editing;
       if (activeTime?.type === 'expression') {
         this.activeModeDraft = 'custom';
         this.advancedRule = JSON.parse(JSON.stringify(activeTime.rule));
@@ -273,20 +298,50 @@ export default {
       this.loadedAdvancedSourcesJson = JSON.stringify(this.advancedSources);
       this.advancedValidationAttempted = false;
     },
+    async saveSimple() {
+      if (!this.simpleDraftDirty || !this.valid) return;
+      this.advancedSaveError = '';
+      const draft = this.always_active_pattern_editing;
+      this.activeSaveInFlight++;
+      try {
+        await this.settingsStore.saveLegacyActiveTimeV2(draft);
+        this.loadedSimplePattern = draft;
+        this.loadedActiveTimeJson = this.canonicalActiveTimeJson;
+      } catch (error) {
+        this.advancedSaveError = error instanceof Error ? error.message : String(error);
+      } finally {
+        this.activeSaveInFlight--;
+      }
+    },
     async saveAdvanced() {
       this.advancedSaveError = '';
       this.advancedValidationAttempted = true;
       if (this.advancedErrors.length > 0) return;
+      const submittedRuleJson = JSON.stringify(this.advancedRule);
+      const submittedSourcesJson = JSON.stringify(this.advancedSources);
+      const baselineSources = JSON.parse(this.loadedAdvancedSourcesJson);
+      this.activeSaveInFlight++;
       try {
         await this.settingsStore.saveActiveTimeRuleV2(
-          this.advancedRule,
-          this.advancedSources,
-          JSON.parse(this.loadedAdvancedSourcesJson)
+          JSON.parse(submittedRuleJson),
+          JSON.parse(submittedSourcesJson),
+          baselineSources
         );
-        this.activeModeDraft = 'custom';
-        this.syncActiveTimeDraft();
+        if (
+          draftMatchesSubmission(this.advancedRule, submittedRuleJson) &&
+          draftMatchesSubmission(this.advancedSources, submittedSourcesJson)
+        ) {
+          this.activeModeDraft = 'custom';
+          this.syncActiveTimeDraft();
+        } else {
+          this.loadedActiveTimeJson = this.canonicalActiveTimeJson;
+          this.loadedAdvancedRuleJson = submittedRuleJson;
+          this.loadedAdvancedSourcesJson = submittedSourcesJson;
+        }
       } catch (error) {
         this.advancedSaveError = error instanceof Error ? error.message : String(error);
+      } finally {
+        this.activeSaveInFlight--;
       }
     },
     async useSimple() {
@@ -298,12 +353,28 @@ export default {
         this.activeModeDraft = 'custom';
         return;
       }
+      const submittedRuleJson = JSON.stringify(this.advancedRule);
+      const submittedSourcesJson = JSON.stringify(this.advancedSources);
+      const submittedPattern = this.always_active_pattern_editing;
+      this.activeSaveInFlight++;
       try {
         await this.settingsStore.useLegacyActiveTimeV2();
-        this.activeModeDraft = 'automatic';
-        this.syncActiveTimeDraft();
+        if (
+          draftMatchesSubmission(this.advancedRule, submittedRuleJson) &&
+          draftMatchesSubmission(this.advancedSources, submittedSourcesJson) &&
+          this.always_active_pattern_editing === submittedPattern
+        ) {
+          this.activeModeDraft = 'automatic';
+          this.syncActiveTimeDraft();
+        } else {
+          this.loadedActiveTimeJson = this.canonicalActiveTimeJson;
+          this.loadedAdvancedRuleJson = submittedRuleJson;
+          this.loadedAdvancedSourcesJson = submittedSourcesJson;
+        }
       } catch (error) {
         this.advancedSaveError = error instanceof Error ? error.message : String(error);
+      } finally {
+        this.activeSaveInFlight--;
       }
     },
   },
